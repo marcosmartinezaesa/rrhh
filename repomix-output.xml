@@ -32,7 +32,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Only files matching these patterns are included: server.js, ocr.py, iniciar.cmd, public/**, scripts/**, test/**, README.md, package.json, repomix.config.json, .gitignore, .repomixignore, docs/**
+- Only files matching these patterns are included: server.js, ocr.py, iniciar.cmd, public/**, scripts/**, test/**, README.md, package.json, repomix.config.json, .gitignore, .repomixignore, docs/**, lib/**, extract_cv.py, .puppeteerrc.cjs, iniciar-recepcion.cmd
 - Files matching these patterns are excluded: data/**, backups/**, node_modules/**, .git/**, .env*, *.sqlite*, *.db, *.pem, *.key, repomix-output.*, package-lock.json
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
@@ -43,28 +43,975 @@ The content is organized as follows:
 
 <directory_structure>
 .gitignore
+.puppeteerrc.cjs
 .repomixignore
+docs/recepcion-cv.md
 docs/transferencias-referencia.md
+extract_cv.py
+iniciar-recepcion.cmd
 iniciar.cmd
+lib/application.js
+lib/cv.js
+lib/experience.js
+lib/export.js
+lib/storage.js
+lib/whatsapp.js
 ocr.py
 package.json
 public/app.js
 public/assets/reference-logo-0.png
 public/assets/reference-logo-1.png
 public/index.html
+public/reception.js
 public/style.css
 README.md
 repomix.config.json
 scripts/browser-check.js
+scripts/browser-reception.js
 scripts/excel-import.js
 scripts/import-excel.js
 server.js
 test/excel-import.test.js
 test/integration.test.js
+test/reception.test.js
+test/sync.test.js
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path=".puppeteerrc.cjs">
+// RRHH usa un Chrome/Edge instalado, configurado mediante WHATSAPP_BROWSER.
+module.exports = {skipDownload: true};
+</file>
+
+<file path="docs/recepcion-cv.md">
+# Recepción de CV y experiencia laboral
+
+## Recorrido
+
+1. Iniciar con `iniciar.cmd` e ingresar con el usuario existente.
+2. Abrir **WhatsApp y sincronización** como administrador. Verificar que la cuenta prevista no esté administrada por otra integración y pulsar **Iniciar conexión / mostrar QR**.
+3. Escanear el QR real desde WhatsApp → Dispositivos vinculados. Se valida la cuenta configurada antes de admitir recepciones. No se envían mensajes.
+4. Elegir fechas para sincronizar. La escucha de nuevos mensajes comienza al estar conectado. La sincronización histórica se solicita explícitamente.
+5. Revisar **Adjuntos por revisar**, asociar a una ficha existente, crear una persona diferente o marcar el archivo como ajeno a una postulación.
+6. En **Postulantes y CV**, abrir la ficha, verificar atributos, versiones y experiencia laboral.
+7. En **Descargas por fecha**, elegir el rango y modo, revisar faltantes y generar el ZIP. Descargar cuando el trabajo esté listo.
+
+## Almacenamiento y migración
+
+SQLite permanece en `data/rrhh.sqlite` y los originales en `data/cv`. `DATA_DIR` permite otro destino. La migración aditiva versión 2 guarda primero una instantánea SQLite con `VACUUM INTO`, dentro de `data/migration-backups`. Además se creó un respaldo previo de base y CV en `backups/antes-recepcion-*` durante la implementación.
+
+No se cambian usuarios ni hashes de contraseña. Se conserva el texto `candidates.experience`, las notas, las tablas de convocatorias y los documentos heredados. Los documentos antiguos sin fecha de recepción verificable quedan visibles con fecha por confirmar y fuera de las exportaciones por recepción hasta registrar una recepción real. No se toma la fecha de importación como fecha original.
+
+Los servicios en `lib/` separan persistencia, identidad, archivos, extracción, experiencia, WhatsApp, sincronización, exportación y controladores. `server.js` mantiene el acceso existente. Las funciones anteriores de evaluación y convocatorias están fuera de la navegación; sus datos y rutas anteriores se conservan por compatibilidad.
+
+## WhatsApp
+
+- Dependencia real: `whatsapp-web.js`, con `LocalAuth` exclusiva en `data/whatsapp-auth/session-rrhh` y caché en `data/whatsapp-cache`. No se usa takeover.
+- Navegador: `WHATSAPP_BROWSER`, ruta completa a Chrome o Edge. Se utiliza el navegador instalado; `.puppeteerrc.cjs` evita descargar otro durante `npm ci`.
+- Cuenta esperada: `WHATSAPP_ACCOUNT` (por defecto `5491151475803`). Una cuenta diferente detiene la recepción.
+- No es posible conocer desde RRHH todas las integraciones externas de una cuenta antes de vincular. Se exige la comprobación del administrador y se detiene el cliente si WhatsApp informa un conflicto. El bloqueo local evita dos clientes RRHH sobre la misma sesión.
+- Después de reiniciar, volver a pulsar **Iniciar conexión**; LocalAuth reutiliza la sesión exclusiva sin pedir QR si sigue válida. Los trabajos interrumpidos quedan pausados para reanudar desde el panel.
+- Historial: `WHATSAPP_HISTORY_LIMIT` (5000 mensajes por chat). Se informa cuántos chats y mensajes fueron recuperados, la fecha más antigua devuelta y si se alcanzó el límite. No se garantiza que WhatsApp entregue todo el historial ni todos los medios antiguos.
+- Descargas y chats se procesan en serie, fuera de las peticiones del panel. La pausa se aplica entre operaciones; una operación de WhatsApp en curso tiene plazo limitado. Los medios pendientes y fallidos son reintentables, sin marcarse como completados antes de guardar los bytes.
+- Se excluyen grupos, estados y canales. Los identificadores `@lid` se conservan; sólo se completa un teléfono si WhatsApp permite resolverlo.
+
+## Versiones e identidad
+
+`cv_files` tiene una clave única SHA-256; `cv_receipts` tiene unicidad por cuenta, chat y mensaje. `cv_versions` distingue versiones por postulante y hash. Cada recepción original se conserva. La versión vigente es la incorporada más recientemente según la fecha original, no según el orden de procesamiento. Un reenvío idéntico no actualiza su incorporación.
+
+El nombre no fusiona personas globalmente. Dentro de un chat ya asociado, una actualización con el mismo nombre explícito puede vincularse si no contradice el DNI confirmado; si falta evidencia, se pide asociación manual. Un hash idéntico de otro chat no fusiona las fichas. Un tercero explícito o datos distintos quedan pendientes. La unión entre fichas es una acción explícita del administrador y conserva la ficha de origen como antecedente.
+
+SHA-256 sólo reconoce bytes idénticos. Un archivo regenerado o recomprimido puede tener otro hash. Un archivo viejo nunca visto por RRHH, reenviado hoy, no revela por sus bytes la fecha de su primera circulación: esa antigüedad requiere revisar el origen. Cuando se recibe también el mensaje histórico, la fecha mínima corrige la incorporación de esa versión.
+
+## Lectura y experiencia
+
+`extract_cv.py` extrae texto por página y usa Tesseract para páginas escaneadas o con imágenes, incluidos PDF mixtos. Las imágenes pasan por OCR local. Máximo 40 páginas, 15 MB por archivo y 240 segundos por lectura. Fallos de lectura o experiencia conservan el original descargable. El panel permite reintentar.
+
+La extracción local usa reglas conservadoras, no un servicio externo ni un modelo de IA. Reconoce atributos etiquetados y secciones de experiencia. Diseños complejos, puestos sin etiquetas y fechas no normalizadas requieren completar manualmente; conserva el fragmento y señala lo no informado. No convierte el nombre de una empresa en tareas ni en categorías. Tampoco usa edad o categorías para puntuar o descartar.
+
+Cada `ExperienciaLaboral` admite varias categorías. `employment_sources` guarda una instantánea por CV o mensaje de respaldo; `employment_history` guarda las correcciones. La misma fuente no se inserta otra vez al reprocesar. Las fuentes diferentes de un mismo empleo se agrupan; las diferencias se presentan como contradicción y no sustituyen una corrección confirmada. Un empleo no identificable con certeza puede requerir revisión manual: no se promete conciliación semántica perfecta de CV arbitrarios.
+
+La experiencia manual debe asociarse a una versión de CV para exportarse con ella. Si se cargó antes de tener un CV, puede abrirse después y elegir la versión. Los datos sin versión se conservan en la ficha y no se atribuyen retrospectivamente a cualquier CV.
+
+Se separa duración declarada de calculada. Fechas exactas permiten días; mes/año permite meses; año solo queda sin cálculo. Los totales por categoría unen intervalos con fechas completas, sin sumar dos veces el solapamiento. Períodos incompletos quedan contados como pendientes, no como cero experiencia.
+
+## ZIP
+
+El rango incluye ambos días completos en `America/Argentina/Buenos_Aires`.
+
+- **Postulantes nuevos**: primera incorporación verificable dentro del rango.
+- **CV nuevos o actualizados**: alguna incorporación de versión dentro del rango.
+
+Se elige una versión por postulante hasta el cierre del rango. Cada hash se empaqueta una vez; las asociaciones constan en `indice.csv`. Se incluye `experiencias.csv`, una fila por empleo de esa versión, con fuentes, fragmentos y estado de revisión. Las correcciones de una versión posterior no reemplazan las fuentes de una anterior.
+
+Se neutralizan fórmulas en celdas CSV. El ZIP se genera mediante streams en un archivo temporal, fuera de la petición web; sólo se habilita su descarga tras completarse. Si faltan originales o hay recepciones sin resolver en el rango, la generación se bloquea para no presentar una entrega incompleta. El OCR pendiente no bloquea los originales: `LEEME.txt` y el índice informan el estado de lectura. Las exportaciones no consumen ni mueven los CV. Tras un reinicio se puede volver a generar el mismo rango.
+
+## Pruebas
+
+`npm test`: migración aditiva en bases aisladas; permisos; conflictos concurrentes; deduplicación; versiones fuera de orden; fuentes de experiencia y correcciones; solapamientos; CSV; ZIP; sincronización con cliente controlado, QR sintético, exclusión de grupos y LID sin teléfono inventado.
+
+`node scripts/browser-reception.js`: alta de administrador en base temporal, ficha, carga de PDF de prueba real, experiencia manual, vista previa y descarga efectiva del ZIP, escritorio y móvil. No conecta WhatsApp real.
+
+Pendiente de prueba en la cuenta real: escaneo QR, sesión autenticada, cobertura histórica, recepción en vivo y disponibilidad de medios antiguos. Ningún QR sintético de pruebas aparece en el servidor productivo. No se modificó Transferencias, C:\bot ni sus sesiones o procesos.
+
+La auditoría npm detecta avisos heredados de `extract-zip`, dependencia del descargador de navegadores de Puppeteer. RRHH usa un navegador instalado y no acepta ZIP para extraer ni invoca ese descargador. No se realizó una actualización mayor incompatible para ocultar esos avisos; corresponde revisar la actualización de Puppeteer/Node antes de habilitar descargas de navegadores.
+
+Documentación: [whatsapp-web.js](https://docs.wwebjs.dev/Client.html), [Archiver](https://www.archiverjs.com/docs/quickstart/).
+</file>
+
+<file path="extract_cv.py">
+import sys, subprocess, tempfile, os, json
+import pymupdf
+
+source, binary, language = sys.argv[1:4]
+pages, errors = [], []
+with tempfile.TemporaryDirectory(prefix='rrhh-read-') as folder:
+    doc = pymupdf.open(source)
+    if len(doc) > 40:
+        raise ValueError('Lectura limitada a 40 páginas; el original sigue disponible')
+    for index, page in enumerate(doc):
+        text = page.get_text() if doc.is_pdf else ''
+        method = 'texto nativo'
+        native_text = text
+        # PDF mixto: OCR también si la página contiene una imagen grande junto al texto.
+        images = page.get_images() if doc.is_pdf else []
+        needs_ocr = len(text.strip()) < 40 or bool(images)
+        if needs_ocr:
+            try:
+                target = os.path.join(folder, f'{index}.png')
+                page.get_pixmap(matrix=pymupdf.Matrix(2, 2)).save(target)
+                output = subprocess.run([binary, target, 'stdout', '-l', language], capture_output=True, timeout=50, check=True)
+                ocr = output.stdout.decode('utf-8', errors='replace')
+                if len(ocr.strip()) >= len(text.strip()): text, method = ocr, 'OCR local'
+                elif ocr.strip(): text, method = text + '\n\n' + ocr, 'Texto nativo y OCR local'
+            except Exception as exc:
+                errors.append(f'Página {index+1}: OCR pendiente ({type(exc).__name__})')
+        pages.append({'page': index+1, 'text': text, 'nativeText': native_text, 'method': method})
+print(json.dumps({'pages': pages, 'errors': errors}, ensure_ascii=True))
+</file>
+
+<file path="iniciar-recepcion.cmd">
+@echo off
+cd /d "%~dp0"
+set PORT=3051
+node server.js
+pause
+</file>
+
+<file path="lib/application.js">
+const path=require('path');const fs=require('fs');const crypto=require('crypto');
+const {migrate,Repositorios,error,json,now}=require('./storage');
+const {ExperienciaService,CATEGORIES}=require('./experience');
+const {IdentidadService,CVService,ExtraccionService}=require('./cv');
+const {WhatsAppService,SincronizacionService}=require('./whatsapp');
+const {ExportacionService}=require('./export');
+function install(app,db,root,upload,wrap){
+  migrate(db,root);
+  const repo=new Repositorios(db,root),identity=new IdentidadService(repo),experience=new ExperienciaService(repo);
+  const cv=new CVService(repo,identity),extraction=new ExtraccionService(repo,identity,experience);
+  cv.extraction=extraction;
+  const wa=new WhatsAppService(repo,cv),sync=new SincronizacionService(repo,wa),exports=new ExportacionService(repo,experience);wa.sync=sync;
+  const admin=(req,res,next)=>req.user.role==='admin'?next():res.status(403).json({error:'Sólo administradores'});
+  const personId=req=>Number(req.params.id);
+  app.get('/api/candidates',(req,res)=>res.json(repo.list()));
+  app.get('/api/people/:id',wrap((req,res)=>{
+    const id=personId(req),p=repo.person(id),versions=repo.versions(id);
+    const evidence=db.prepare('SELECT * FROM person_evidence WHERE candidate_id=? ORDER BY id').all(id);
+    const matches=p.dniConfirmed||p.dniExtracted?db.prepare('SELECT id,name FROM candidates WHERE id<>? AND mergedInto IS NULL AND ((dniConfirmed<>\'\' AND replace(dniConfirmed,\'.\',\'\')=?) OR (dniExtracted<>\'\' AND replace(dniExtracted,\'.\',\'\')=?))').all(id,(p.dniConfirmed||p.dniExtracted).replace(/\D/g,''),(p.dniConfirmed||p.dniExtracted).replace(/\D/g,'')):[];
+    const sources=experience.list(id);const current=versions[0];
+    res.json({...p,versions,evidence,receipts:db.prepare('SELECT * FROM cv_receipts WHERE candidate_id=? ORDER BY received').all(id),experiences:sources,categories:CATEGORIES,matches,totals:experience.totals(current?sources.filter(s=>s.version_id===current.id):sources,now().slice(0,10))});
+  }));
+  app.get('/api/candidates/:id/documents',wrap((req,res)=>{repo.person(personId(req));res.json(repo.versions(personId(req)));}));
+  app.post('/api/candidates/:id/documents',upload.single('file'),wrap((req,res)=>{
+    const id=personId(req);repo.person(id);if(!req.file)throw error('Seleccioná un archivo');
+    const received=req.body.received;if(!received||!Number.isFinite(Date.parse(received)))throw error('Indicá la fecha original de recepción');
+    const result=cv.receive({account:'manual',chat:'person:'+id,message_id:crypto.randomUUID(),received,candidate_id:id,original:req.file.originalname,isCV:true},req.file.buffer);
+    repo.log(`CV manual guardado para ${id}`,req.user.id);res.json({id:result.receipt.id,duplicate:result.duplicate});
+  }));
+  app.get('/api/files/:hash',wrap((req,res)=>{const f=repo.file(req.params.hash);if(!f)throw error('Archivo no encontrado',404);const target=path.join(root,'cv',f.path);if(!fs.existsSync(target))throw error('El original falta en el servidor',409);res.download(target,f.original);}));
+  app.get('/api/files/:hash/text',wrap((req,res)=>{const f=repo.file(req.params.hash);if(!f)throw error('Archivo no encontrado',404);res.json({state:f.read_state,error:f.read_error,pages:json(f.pages)});}));
+  app.post('/api/files/:hash/retry',wrap((req,res)=>{const f=repo.file(req.params.hash);if(!f)throw error('Archivo no encontrado',404);if(f.read_state==='reading')throw error('Lectura en curso',409);db.prepare("UPDATE cv_files SET read_state='pending' WHERE hash=?").run(f.hash);extraction.enqueue(f.hash);res.json({ok:true});}));
+  app.get('/api/receipts',(req,res)=>res.json(db.prepare("SELECT r.*,f.read_state FROM cv_receipts r LEFT JOIN cv_files f ON f.hash=r.hash WHERE r.candidate_id IS NULL AND r.classification<>'other' ORDER BY r.received DESC LIMIT 1000").all()));
+  app.post('/api/receipts/:id/resolve',wrap((req,res)=>{
+    const r=db.prepare('SELECT * FROM cv_receipts WHERE id=?').get(personId(req));if(!r)throw error('Recepción no encontrada',404);
+    if(req.body.action==='other'){if(r.candidate_id)throw error('La recepción ya pertenece a una ficha');db.prepare("UPDATE cv_receipts SET classification='other' WHERE id=?").run(r.id);repo.log(`Recepción ${r.id} marcada ajena a la postulación`,req.user.id);return res.json({ok:true});}
+    if(!r.hash)throw error('Primero reintentá la descarga desde WhatsApp');
+    let version;
+    db.transaction(()=>{if(req.body.action==='new'){if(r.candidate_id)throw error('La recepción ya está asociada');version=identity.createForReceipt(r,{name:{value:String(req.body.name||'Nombre por confirmar').slice(0,500)}});}else if(req.body.action==='associate'){version=identity.associate(r.id,Number(req.body.candidate_id),req.user.id);}else throw error('Acción inválida');})();
+    extraction.enqueue(r.hash);res.json({ok:true,candidate_id:version.candidate_id});
+  }));
+  app.post('/api/people/:id/merge',admin,wrap((req,res)=>{identity.merge(personId(req),Number(req.body.target),req.body.versions||{},req.user.id);res.json({ok:true});}));
+  app.post('/api/people/:id/experiences',wrap((req,res)=>res.json({id:experience.save(personId(req),req.body,req.user.id)})));
+  app.get('/api/whatsapp',(req,res)=>res.json(wa.status(req.user.role==='admin')));
+  app.post('/api/whatsapp/connect',admin,wrap(async(req,res)=>{await wa.connect(req.body);repo.log('Inicio de conexión de WhatsApp RRHH',req.user.id);res.json({ok:true});}));
+  app.post('/api/whatsapp/disconnect',admin,wrap(async(req,res)=>{await wa.disconnect();res.json({ok:true});}));
+  app.post('/api/whatsapp/retry',admin,wrap((req,res)=>{wa.retry().catch(e=>wa.fail(e));res.json({ok:true});}));
+  app.get('/api/sync',admin,(req,res)=>res.json(sync.list()));
+  app.post('/api/sync',admin,wrap((req,res)=>res.json(sync.start(req.body))));
+  app.post('/api/sync/:id/resume',admin,wrap((req,res)=>res.json(sync.resume(personId(req)))));
+  app.post('/api/sync/cancel',admin,(req,res)=>{sync.cancel();res.json({ok:true});});
+  app.post('/api/exports/preview',wrap((req,res)=>{const p=exports.preview(req.body);res.json({...p,rows:p.rows.map(({path,...r})=>r)});}));
+  app.post('/api/exports',wrap((req,res)=>res.json(exports.start(req.body,req.user.id))));
+  app.get('/api/exports/:id',wrap((req,res)=>{const {path,...job}=exports.get(req.params.id,req.user.id);res.json(job);}));
+  app.get('/api/exports/:id/download',wrap((req,res)=>{const job=exports.get(req.params.id,req.user.id);if(job.state!=='ready')throw error('El ZIP todavía no está listo',409);res.download(job.path,'RRHH_CVs_'+job.id+'.zip');}));
+  return {repo,identity,cv,extraction,experience,wa,sync,exports,start:()=>extraction.resume(),close:async()=>{extraction.stopped=true;await wa.disconnect();}};
+}
+module.exports={install};
+</file>
+
+<file path="lib/cv.js">
+const fs=require('fs');const path=require('path');const {execFile}=require('child_process');const {promisify}=require('util');
+const {digest,error,now,json}=require('./storage');
+const {extractExperiences}=require('./experience');
+const execute=promisify(execFile);
+function inspectBytes(bytes){
+  if(bytes.subarray(0,5).toString()==='%PDF-')return {mime:'application/pdf',ext:'.pdf'};
+  if(bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return {mime:'image/png',ext:'.png'};
+  if(bytes[0]===255&&bytes[1]===216&&bytes[2]===255)return {mime:'image/jpeg',ext:'.jpg'};
+  throw error('Sólo PDF, PNG y JPG válidos');
+}
+function extractFields(pages){const result={};for(const p of pages){for(const [key,pattern] of Object.entries({name:/(?:nombre(?: completo| y apellido)?|apellido y nombre)\s*:\s*([^\n]+)/i,dni:/\bdni\s*:?\s*([\d. -]{7,14})/i,cvPhone:/(?:tel[eé]fono|celular|whatsapp)\s*:?\s*(\+?[\d ()-]{8,22})/i,birthDate:/(?:fecha de nacimiento|nacim[ie]+nto)\s*:\s*([^\n]+)/i,locality:/(?:localidad)\s*:\s*([^\n]+)/i,address:/(?:domicilio|direcci[oó]n)\s*:\s*([^\n]+)/i,license:/(?:licencia|registro)(?: de conducir)?\s*:\s*([^\n]+)/i,declaredAge:/\bedad\s*:\s*(\d{1,3})\s*(?:años)?/i})){const m=p.text.match(pattern);if(m&&!result[key])result[key]={value:m[1].trim(),fragment:m[0],page:p.page};}}return result;}
+class IdentidadService{
+  constructor(repo){this.repo=repo;this.db=repo.db;}
+  associate(receiptId,candidateId,user=null){
+    return this.db.transaction(()=>{
+      const r=this.db.prepare('SELECT * FROM cv_receipts WHERE id=?').get(receiptId);if(!r?.hash)throw error('El adjunto todavía no está disponible');
+      if(r.candidate_id&&r.candidate_id!==candidateId)throw error('La recepción ya está asociada; utilizá la unión explícita de fichas');
+      this.repo.person(candidateId);
+      this.db.prepare("UPDATE cv_receipts SET candidate_id=?,classification='cv' WHERE id=?").run(candidateId,r.id);
+      this.db.prepare('INSERT OR IGNORE INTO chat_people VALUES (?,?,?)').run(r.account,r.chat,candidateId);
+      this.db.prepare('INSERT INTO cv_versions(candidate_id,hash,incorporated) VALUES (?,?,?) ON CONFLICT(candidate_id,hash) DO UPDATE SET incorporated=min(incorporated,excluded.incorporated),date_known=1').run(candidateId,r.hash,r.received);
+      this.repo.log(`Recepción ${r.id} asociada al postulante ${candidateId}`,user);
+      return this.db.prepare('SELECT * FROM cv_versions WHERE candidate_id=? AND hash=?').get(candidateId,r.hash);
+    })();
+  }
+  createForReceipt(receipt,fields={}){
+    const id=this.db.prepare("INSERT INTO candidates(name,phone,source) VALUES (?,?,?)").run(fields.name?.value||'Nombre por confirmar',receipt.phone||'',`WhatsApp · ${receipt.chat}`).lastInsertRowid;
+    return this.associate(receipt.id,id);
+  }
+  automatic(r,fields){
+    if(r.candidate_id)return this.associate(r.id,r.candidate_id);
+    const people=this.db.prepare('SELECT c.* FROM chat_people cp JOIN candidates c ON c.id=cp.candidate_id WHERE cp.account=? AND cp.chat=? AND c.mergedInto IS NULL').all(r.account,r.chat);
+    // Un tercero explícito, una identidad distinta o una actualización sin evidencia quedan pendientes.
+    if(/(?:cv|curr[ií]culum) de (?:mi |un |una )|(?:mi hermano|mi hermana|mi hijo|mi hija|mi amigo|mi amiga)/i.test(r.caption))return null;
+    if(!people.length){if(this.db.prepare('SELECT 1 FROM cv_versions WHERE hash=?').get(r.hash))return null;return this.createForReceipt(r,fields);}
+    const exact=people.filter(p=>this.db.prepare('SELECT 1 FROM cv_versions WHERE candidate_id=? AND hash=?').get(p.id,r.hash));
+    if(exact.length===1)return this.associate(r.id,exact[0].id);
+    const normalize=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+    // El nombre sólo aporta evidencia dentro del mismo chat; nunca fusiona fichas globalmente.
+    if(people.length===1&&fields.name&&normalize(people[0].name)===normalize(fields.name.value)){
+      const p=people[0];if(p.dniConfirmed&&fields.dni&&p.dniConfirmed.replace(/\D/g,'')!==fields.dni.value.replace(/\D/g,''))return null;
+      return this.associate(r.id,p.id);
+    }
+    return null;
+  }
+  merge(from,to,versions,user){
+    if(from===to)throw error('Elegí dos fichas diferentes');const a=this.repo.person(from),b=this.repo.person(to);
+    if(a.version!==versions.from||b.version!==versions.to)throw error('Las fichas cambiaron; revisá antes de unir',409);
+    this.db.transaction(()=>{
+      for(const v of this.repo.versions(from)){
+        const other=this.db.prepare('SELECT * FROM cv_versions WHERE candidate_id=? AND hash=?').get(to,v.hash);
+        if(other){
+          this.db.prepare('UPDATE employment_sources SET version_id=? WHERE version_id=?').run(other.id,v.id);
+          this.db.prepare('UPDATE OR IGNORE person_evidence SET version_id=?,candidate_id=? WHERE version_id=?').run(other.id,to,v.id);
+          this.db.prepare('UPDATE cv_versions SET incorporated=min(incorporated,?) WHERE id=?').run(v.incorporated,other.id);
+          this.db.prepare('UPDATE legacy_document_map SET version_id=? WHERE version_id=?').run(other.id,v.id);
+          // Mantener versiones antiguas como parte del historial de la ficha unida.
+        }else this.db.prepare('UPDATE cv_versions SET candidate_id=? WHERE id=?').run(to,v.id);
+      }
+      this.db.prepare('UPDATE employment SET candidate_id=? WHERE candidate_id=?').run(to,from);
+      this.db.prepare('UPDATE person_evidence SET candidate_id=? WHERE candidate_id=?').run(to,from);
+      this.db.prepare('UPDATE cv_receipts SET candidate_id=? WHERE candidate_id=?').run(to,from);
+      this.db.prepare('INSERT OR IGNORE INTO chat_people SELECT account,chat,? FROM chat_people WHERE candidate_id=?').run(to,from);
+      this.db.prepare('UPDATE candidates SET mergedInto=?,version=version+1 WHERE id=?').run(to,from);
+      this.db.prepare('UPDATE candidates SET version=version+1,notes=notes||? WHERE id=?').run(`\nFicha unida N.º ${from}. Notas originales:\n${a.notes}\nExperiencia original:\n${a.experience}`,to);
+      this.repo.log(`Unión explícita de ${from} en ${to}; se conserva ficha origen`,user);
+    })();
+  }
+}
+class CVService{
+  constructor(repo,identity){this.repo=repo;this.db=repo.db;this.identity=identity;this.extraction=null;}
+  receive(meta,bytes){
+    if(bytes.length>15*1024*1024)throw error('Adjunto mayor de 15 MB');const format=inspectBytes(bytes);const hash=digest(bytes);
+    if(!Number.isFinite(Date.parse(meta.received)))throw error('Fecha original no disponible');
+    let file=this.repo.file(hash);
+    if(!file||!fs.existsSync(path.join(this.repo.root,'cv',file.path))){const filename=file?.path||hash+format.ext,target=path.join(this.repo.root,'cv',filename);if(!fs.existsSync(target)){const temp=target+'.'+require('crypto').randomUUID()+'.tmp';fs.writeFileSync(temp,bytes,{flag:'wx'});fs.renameSync(temp,target);}
+      this.db.prepare('INSERT OR IGNORE INTO cv_files(hash,path,mime,size,original,created) VALUES (?,?,?,?,?,?)').run(hash,filename,format.mime,bytes.length,String(meta.original||filename).slice(0,300),now());file=this.repo.file(hash);
+    }
+    const result=this.db.transaction(()=>{
+      this.db.prepare('INSERT OR IGNORE INTO cv_receipts(account,chat,message_id,received,phone,caption,context,original,created) VALUES (?,?,?,?,?,?,?,?,?)').run(meta.account,meta.chat,meta.message_id,new Date(meta.received).toISOString(),meta.phone||'',String(meta.caption||'').slice(0,12000),String(meta.context||'').slice(0,12000),meta.original||file.original,now());
+      const receipt=this.db.prepare('SELECT * FROM cv_receipts WHERE account=? AND chat=? AND message_id=?').get(meta.account,meta.chat,meta.message_id);
+      if(receipt.state==='saved')return {receipt,duplicate:true};
+      const duplicate=!!this.db.prepare("SELECT id FROM cv_receipts WHERE account=? AND chat=? AND hash=? AND state='saved'").get(meta.account,meta.chat,hash);
+      this.db.prepare("UPDATE cv_receipts SET hash=?,state='saved',error='',classification=? WHERE id=?").run(hash,meta.isCV?'cv':'review',receipt.id);
+      if(meta.candidate_id)this.identity.associate(receipt.id,meta.candidate_id);
+      return {receipt:this.db.prepare('SELECT * FROM cv_receipts WHERE id=?').get(receipt.id),duplicate};
+    })();
+    this.extraction?.enqueue(hash);return result;
+  }
+  failure(meta,reason){
+    this.db.prepare("INSERT INTO cv_receipts(account,chat,message_id,received,phone,caption,original,state,error,created,attempts) VALUES (?,?,?,?,?,?,?,'error',?,?,1) ON CONFLICT(account,chat,message_id) DO UPDATE SET state=CASE WHEN state='saved' THEN state ELSE 'error' END,error=CASE WHEN state='saved' THEN '' ELSE excluded.error END,attempts=attempts+1").run(meta.account,meta.chat,meta.message_id,meta.received,meta.phone||'',meta.caption||'',meta.original||'',String(reason).slice(0,1000),now());
+  }
+}
+class ExtraccionService{
+  constructor(repo,identity,experiences){this.repo=repo;this.db=repo.db;this.identity=identity;this.experiences=experiences;this.queue=[];this.queued=new Set();this.running=false;this.stopped=false;}
+  enqueue(hash){if(!this.queued.has(hash)){this.queued.add(hash);this.queue.push(hash);}if(!this.running)setImmediate(()=>this.drain());}
+  resume(){this.db.prepare("UPDATE cv_files SET read_state='pending' WHERE read_state='reading'").run();for(const f of this.db.prepare("SELECT hash FROM cv_files WHERE read_state='pending'").all())this.enqueue(f.hash);}
+  async drain(){if(this.running||this.stopped)return;this.running=true;try{while(this.queue.length&&!this.stopped){const hash=this.queue.shift();try{await this.process(hash);}catch(e){this.db.prepare("UPDATE cv_files SET read_state='error',read_error=? WHERE hash=?").run(String(e.message).slice(0,1000),hash);}finally{this.queued.delete(hash);}}}finally{this.running=false;}}
+  async process(hash){
+    let file=this.repo.file(hash);if(!file)return;
+    if(!['done','partial'].includes(file.read_state)){
+      this.db.prepare("UPDATE cv_files SET read_state='reading',read_error='' WHERE hash=?").run(hash);
+      const spanish=fs.existsSync(path.join(this.repo.root,'tessdata','spa.traineddata'));
+      const result=await execute(process.env.PYTHON_BIN||'python',[path.join(__dirname,'../extract_cv.py'),path.join(this.repo.root,'cv',file.path),process.env.TESSERACT_BIN||'C:\\Program Files\\Tesseract-OCR\\tesseract.exe',process.env.OCR_LANG||(spanish?'spa':'eng')],{windowsHide:true,timeout:240000,maxBuffer:8*1024*1024,env:{...process.env,...(spanish&&!process.env.OCR_LANG?{TESSDATA_PREFIX:path.join(this.repo.root,'tessdata')}:{})}});
+      const payload=JSON.parse(result.stdout);const fields=extractFields(payload.pages);
+      this.db.prepare("UPDATE cv_files SET pages=?,extracted=?,read_state=?,read_error=?,extraction_version=extraction_version+1 WHERE hash=?").run(JSON.stringify(payload.pages),JSON.stringify(fields),payload.errors.length?'partial':'done',payload.errors.join('\n'),hash);file=this.repo.file(hash);
+    }
+    const pages=json(file.pages)||[],fields=json(file.extracted)||{};const full=pages.map(p=>p.text).join('\n');
+    for(const r of this.db.prepare("SELECT * FROM cv_receipts WHERE hash=? AND state='saved' AND classification<>'other'").all(hash)){
+      const signal=/\b(cv|curr[ií]culum|curriculum vitae|postulaci[oó]n)\b/i.test([r.original,r.caption].join(' '));
+      const contentCV=/experiencia(?: laboral)?|antecedentes laborales/i.test(full)&&/educaci[oó]n|formaci[oó]n|estudios|datos personales/i.test(full);
+      if(r.classification==='cv'||signal||contentCV){this.db.prepare("UPDATE cv_receipts SET classification='cv' WHERE id=?").run(r.id);this.identity.automatic({...r,classification:'cv'},fields);}
+    }
+    const jobs=extractExperiences(pages);
+    for(const v of this.db.prepare('SELECT v.* FROM cv_versions v JOIN candidates c ON c.id=v.candidate_id WHERE v.hash=? AND c.mergedInto IS NULL').all(hash)){
+      for(const [field,evidence] of Object.entries(fields))this.db.prepare('INSERT OR IGNORE INTO person_evidence(candidate_id,version_id,field,value,fragment,page) VALUES (?,?,?,?,?,?)').run(v.candidate_id,v.id,field,evidence.value,evidence.fragment,evidence.page);
+      this.db.prepare("UPDATE candidates SET dniExtracted=? WHERE id=? AND dniExtracted=''").run(fields.dni?.value||'',v.candidate_id);
+      this.experiences.ingest(v,jobs);
+      for(const receipt of this.db.prepare('SELECT * FROM cv_receipts WHERE candidate_id=? AND hash=?').all(v.candidate_id,hash)){
+        if(/experiencia laboral\s*:/i.test(receipt.caption))this.experiences.ingest(v,extractExperiences([{page:null,text:receipt.caption}]),receipt);
+      }
+    }
+  }
+}
+module.exports={CVService,IdentidadService,ExtraccionService,inspectBytes,extractFields};
+</file>
+
+<file path="lib/experience.js">
+const {digest,error,now,json}=require('./storage');
+const CATEGORIES=['Ventas','Atención al cliente','Reparto','Conducción de vehículos','Cobranza o manejo de dinero','Depósito y logística','Carga y descarga','Otras tareas'];
+const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');
+function categories(text){
+  // Sólo tareas explícitas; los nombres de empleadores nunca se pasan a esta función.
+  const t=text.toLowerCase();const found=[];
+  for(const [label,re] of [
+    ['Ventas',/\b(vend[íie]|venta de|vendedor|comercializ)/],['Atención al cliente',/atenci[oó]n al (?:cliente|p[uú]blico)|atend[íi]a? (?:a )?clientes/],
+    ['Reparto',/\b(repart[íi]|reparto|repartidor|distribu[íi]a|entrega(?:ba)? de mercader)/],['Conducción de vehículos',/\b(chofer|conductor|conduc[íi]a|maneja(?:ba)? (?:camiones|veh[íi]culos|colectivos))/],
+    ['Cobranza o manejo de dinero',/\b(cobraba|cobranza|cobr[oó]|cajero|manejo de (?:dinero|caja))/],['Depósito y logística',/\b(log[íi]stica|operario de dep[oó]sito|control de stock|almacenamiento|preparaci[oó]n de pedidos)/],
+    ['Carga y descarga',/\b(carga y descarga|cargaba|descargaba|descarga de)/]
+  ])if(re.test(t))found.push(label);
+  return found;
+}
+function partialDate(value){
+  if(!value)return '';
+  if(!/^\d{4}(-\d{2})?(-\d{2})?$/.test(value))throw error('Fecha: usar AAAA, AAAA-MM o AAAA-MM-DD');
+  const [y,m,d]=value.split('-').map(Number);if(y<1900||y>2200||(m!=null&&(m<1||m>12))||(d!=null&&(d<1||d>new Date(Date.UTC(y,m,0)).getUTCDate())))throw error('Fecha laboral inválida');return value;
+}
+class ExperienciaLaboral{
+  constructor(input={}){
+    for(const key of ['employer','role','tasks','declaredDuration'])this[key]=String(input[key]||'').trim().slice(0,12000);
+    this.start=partialDate(input.start||'');this.end=partialDate(input.end||'');
+    this.current=input.current===true?true:input.current===false?false:null;
+    this.categories=Array.isArray(input.categories)?[...new Set(input.categories.filter(v=>CATEGORIES.includes(v)))]:[];
+    if(this.start&&this.end&&this.start.length===this.end.length&&this.start>this.end)throw error('La finalización precede al inicio');
+    if(this.current===true&&this.end)throw error('Un trabajo actual no puede tener fecha final');
+    if(!this.role&&!this.tasks&&!this.employer)throw error('Completá empresa, puesto o tareas');
+  }
+  duration(cutoff){
+    const end=this.end||(this.current===true?cutoff:'');
+    if(this.start.length===10&&end?.length===10){const days=Math.max(0,Math.floor((Date.parse(end)-Date.parse(this.start))/86400000));return {value:days,unit:'días',kind:'calculada',asOf:end};}
+    if(this.start.length===7&&end?.length===7){const [y,m]=this.start.split('-').map(Number),[ey,em]=end.split('-').map(Number);return {value:Math.max(0,(ey-y)*12+em-m),unit:'meses',kind:'calculada'};}
+    return null;
+  }
+}
+function extractExperiences(pages){
+  const jobs=[];
+  for(const page of pages){
+    const text=page.text||'';
+    const section=text.match(/(?:experiencia(?:\s+laboral)?|antecedentes laborales|historial laboral)\s*[:\n]([\s\S]*?)(?=\n\s*(?:educaci[oó]n|formaci[oó]n|estudios|referencias|habilidades|idiomas)\b|$)/i);
+    if(!section)continue;
+    const blocks=section[1].trim().split(/\n\s*\n|\n(?=\s*(?:empresa|empleador)\s*:)/i).filter(Boolean);
+    for(const block of blocks){
+      if(block.length<10)continue;
+      const get=label=>block.match(new RegExp('(?:^|\\n)\\s*(?:'+label+')\\s*:\\s*([^\\n]+)','i'))?.[1]?.trim()||'';
+      const employer=get('empresa|empleador'),role=get('puesto|cargo');
+      const task=get('tareas|funciones|responsabilidades');
+      // Si el diseño no tiene etiquetas se conserva íntegro, sin inventar empresa ni cargo.
+      const tasks=task||block.split('\n').filter(l=>!/^\s*(empresa|empleador|puesto|cargo)\s*:/i.test(l)&&/\b(repartía|atendía|cobraba|vendía|conducía|cargaba|descargaba|realizaba|realicé|trabajé|trabajaba|me encargaba)\b/i.test(l)).join('\n');
+      const dates=block.match(/\b(?:19|20)\d{2}(?:-\d{2}(?:-\d{2})?)?\b/g)||[];
+      let start='',end='';try{start=partialDate(dates[0]||'');end=partialDate(dates[1]||'');}catch{}
+      const current=/\b(actualidad|actualmente|presente|contin[uú]o trabajando)\b/i.test(block)?true:null;
+      const declaredDuration=block.match(/\b\d+\s*(?:a[ñn]os|meses|semanas)\b/i)?.[0]||'';
+      try{jobs.push({data:new ExperienciaLaboral({employer,role,tasks,start,end:current?'':end,current,declaredDuration,categories:categories([role,tasks].join('\n'))}),page:page.page,fragment:block});}catch{jobs.push({data:{employer:'',role:'',tasks:'',start:'',end:'',current:null,declaredDuration:'',categories:[]},page:page.page,fragment:block});}
+    }
+  }
+  return jobs;
+}
+class ExperienciaService{
+  constructor(repo){this.repo=repo;this.db=repo.db;}
+  ingest(version,jobs,receipt=null){this.db.transaction(()=>{const used=new Map();for(const job of jobs){
+    let key=job.data.employer&&job.data.role?'job:'+norm(job.data.employer)+'|'+norm(job.data.role):'text:'+digest(Buffer.from(job.fragment.trim()));
+    if(used.has(key)&&used.get(key)!==job.fragment)key+='|period:'+job.data.start+'|'+job.data.end;
+    used.set(key,job.fragment);
+    let employment=this.db.prepare('SELECT * FROM employment WHERE candidate_id=? AND match_key=?').get(version.candidate_id,key);
+    if(!employment&&key.startsWith('text:')){
+      const tokens=s=>new Set(String(s).toLowerCase().replace(/\b\d+\b/g,'').split(/\W+/).filter(t=>t.length>3));
+      const target=tokens(job.fragment),candidates=this.db.prepare('SELECT e.id,s.fragment FROM employment e JOIN employment_sources s ON s.employment_id=e.id WHERE e.candidate_id=? AND s.version_id<>?').all(version.candidate_id,version.id);
+      const matches=new Set(candidates.filter(s=>{const other=tokens(s.fragment),shared=[...target].filter(t=>other.has(t)).length;return target.size>=5&&shared/Math.max(target.size,other.size)>=0.8;}).map(s=>s.id));
+      if(matches.size===1)employment={id:[...matches][0]};
+    }
+    if(!employment)employment={id:this.db.prepare('INSERT INTO employment(candidate_id,match_key,created) VALUES (?,?,?)').run(version.candidate_id,key,now()).lastInsertRowid};
+    const previous=this.db.prepare('SELECT * FROM employment_sources WHERE employment_id=? ORDER BY id DESC LIMIT 1').get(employment.id);
+    const conflict=previous&&previous.data!==JSON.stringify(job.data)?'La nueva fuente difiere de otra versión. Revisar fechas, tareas y categorías.':'';
+    this.db.prepare('INSERT OR IGNORE INTO employment_sources(employment_id,version_id,source_key,receipt_id,page,fragment,data,conflict) VALUES (?,?,?,?,?,?,?,?)').run(employment.id,version.id,receipt?'message:'+receipt.id:'cv:'+version.id,receipt?.id||null,job.page,job.fragment,JSON.stringify(job.data),conflict);
+  }})();}
+  list(candidate,version){
+    let rows=this.db.prepare(`SELECT s.*,e.candidate_id FROM employment_sources s JOIN employment e ON e.id=s.employment_id WHERE e.candidate_id=? ${version?'AND (s.version_id=? OR s.version_id IS NULL)':''} ORDER BY e.id,s.id`).all(...(version?[candidate,version]:[candidate]));
+    return rows.map(s=>{const data=json(s.data);let duration=null;try{duration=new ExperienciaLaboral(data).duration(now().slice(0,10));}catch{}return {...s,data,duration,history:this.db.prepare('SELECT data,state,revision,changed FROM employment_history WHERE source_id=? ORDER BY id DESC').all(s.id).map(h=>({...h,data:json(h.data)}))};});
+  }
+  save(candidate,body,user){
+    this.repo.person(candidate);const data=new ExperienciaLaboral(body.data);
+    return this.db.transaction(()=>{
+      if(body.id){const source=this.db.prepare('SELECT s.* FROM employment_sources s JOIN employment e ON e.id=s.employment_id WHERE s.id=? AND e.candidate_id=?').get(body.id,candidate);if(!source)throw error('Experiencia no encontrada',404);if(source.revision!==Number(body.revision))throw error('La experiencia fue modificada; volvé a abrirla',409);
+        this.db.prepare('INSERT INTO employment_history(source_id,data,state,revision,changed,user_id) VALUES (?,?,?,?,?,?)').run(source.id,source.data,source.state,source.revision,now(),user);
+        let version=source.version_id;if(version===null&&body.version_id){if(!this.db.prepare('SELECT 1 FROM cv_versions WHERE id=? AND candidate_id=?').get(body.version_id,candidate))throw error('La versión no pertenece al postulante');version=Number(body.version_id);}
+        this.db.prepare('UPDATE employment_sources SET data=?,state=?,revision=revision+1,conflict=?,version_id=? WHERE id=?').run(JSON.stringify(data),body.confirm?'confirmed':'pending',body.confirm?'':source.conflict,version,source.id);return source.id;
+      }
+      const version=body.version_id?this.db.prepare('SELECT id FROM cv_versions WHERE id=? AND candidate_id=?').get(body.version_id,candidate):null;
+      if(body.version_id&&!version)throw error('La versión no pertenece al postulante');
+      const employment=this.db.prepare('INSERT INTO employment(candidate_id,match_key,created) VALUES (?,?,?)').run(candidate,'manual:'+require('crypto').randomUUID(),now()).lastInsertRowid;
+      const source=this.db.prepare('INSERT INTO employment_sources(employment_id,version_id,source_key,page,fragment,data,state) VALUES (?,?,?,?,?,?,?)').run(employment,version?.id||null,'manual',null,String(body.fragment||'Carga manual'),JSON.stringify(data),body.confirm?'confirmed':'pending').lastInsertRowid;
+      this.repo.log(`Experiencia manual ${source} creada`,user);return source;
+    })();
+  }
+  totals(rows,cutoff){
+    const result={};for(const category of CATEGORIES){const intervals=[];let incomplete=0;
+      for(const row of rows){const d=row.data;if(!d.categories.includes(category))continue;const end=d.end||(d.current===true?cutoff:'');if(d.start.length!==10||end.length!==10){incomplete++;continue;}const a=Date.parse(d.start),b=Math.min(Date.parse(end),Date.parse(cutoff));if(b>a)intervals.push([a,b]);}
+      intervals.sort((a,b)=>a[0]-b[0]);const union=[];for(const interval of intervals){const last=union.at(-1);if(last&&interval[0]<=last[1])last[1]=Math.max(last[1],interval[1]);else union.push([...interval]);}
+      if(intervals.length||incomplete)result[category]={days:union.reduce((n,[a,b])=>n+(b-a)/86400000,0),incomplete};
+    }return result;
+  }
+}
+module.exports={ExperienciaLaboral,ExperienciaService,extractExperiences,CATEGORIES,categories};
+</file>
+
+<file path="lib/export.js">
+const fs=require('fs');const path=require('path');const crypto=require('crypto');const {ZipArchive}=require('archiver');
+const {dateRange}=require('./whatsapp');const {error,now}=require('./storage');const {ExperienciaLaboral}=require('./experience');
+function csvCell(value){let s=String(value??'');if(/^[\s\u0000-\u001f]*[=+@-]/.test(s)||/^[\t\r\n]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';}
+const csv=rows=>'\ufeff'+rows.map(r=>r.map(csvCell).join(';')).join('\r\n');
+const safe=s=>String(s||'Sin_nombre').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,70);
+class ExportacionService{
+  constructor(repo,experiences){this.repo=repo;this.db=repo.db;this.experiences=experiences;this.jobs=new Map();fs.mkdirSync(path.join(repo.root,'exports'),{recursive:true});}
+  preview(body){
+    const range=dateRange(body.start,body.end);const mode=body.mode||'new';if(!['new','updated'].includes(mode))throw error('Modo inválido');const rows=[];
+    for(const p of this.repo.list()){
+      const versions=this.repo.versions(p.id).filter(v=>v.date_known&&v.incorporated<range.end);
+      if(!versions.length)continue;const first=this.db.prepare('SELECT min(incorporated) first FROM cv_versions WHERE candidate_id=? AND date_known=1').get(p.id).first;
+      const include=mode==='new'?first>=range.start&&first<range.end:versions.some(v=>v.incorporated>=range.start);
+      if(include){const v=versions[0],f=this.repo.file(v.hash);rows.push({candidate_id:p.id,name:p.name,contact:p.cvPhone||p.phone,version_id:v.id,date:v.incorporated,hash:v.hash,path:f.path,filename:`POST_${String(p.id).padStart(6,'0')}_${safe(p.name)}${path.extname(f.path)}`,reading:f.read_state});}
+    }
+    const hashes=new Map();for(const row of rows){if(hashes.has(row.hash))row.filename=hashes.get(row.hash);else hashes.set(row.hash,row.filename);}
+    const missing=rows.filter(r=>!fs.existsSync(path.join(this.repo.root,'cv',r.path))).map(r=>r.candidate_id);
+    const unresolved=this.db.prepare("SELECT count(*) n FROM cv_receipts WHERE received>=? AND received<? AND (state IN ('error','pending') OR (state='saved' AND classification<>'other' AND candidate_id IS NULL))").get(range.start,range.end).n;
+    const reading=rows.filter(r=>r.reading!=='done').length;
+    return {rows,people:rows.length,files:hashes.size,missing,unresolved,reading,range,mode};
+  }
+  start(body,user){
+    const preview=this.preview(body);if(preview.missing.length||preview.unresolved)throw error('Hay adjuntos pendientes o archivos faltantes en el rango. Resolvelos antes de generar el ZIP',409);
+    const id=crypto.randomUUID(),job={id,user,state:'building',created:now(),people:preview.people,files:preview.files,error:null};
+    this.jobs.set(id,job);
+    // Capturar fuentes de experiencia al crear el trabajo, antes de cambios posteriores.
+    const experienceRows=[['postulante_id','experiencia_id','cv_version_id','empresa','puesto','tareas','inicio','fin','actual','duracion_declarada','duracion_calculada','categorias','fuente','pagina','fragmento','estado','contradiccion']];
+    for(const r of preview.rows){const grouped=new Map();for(const s of this.experiences.list(r.candidate_id,r.version_id)){if(s.version_id===null)continue;if(!grouped.has(s.employment_id))grouped.set(s.employment_id,[]);grouped.get(s.employment_id).push(s);}for(const sources of grouped.values()){
+      const source=sources.find(s=>s.state==='confirmed')||sources.at(-1);
+      // Cargas globales sin versión no se atribuyen retroactivamente a CV anteriores.
+      if(source.version_id===null)continue;
+      const d=source.data;let duration=null;try{duration=new ExperienciaLaboral(d).duration(body.end);}catch{}
+      experienceRows.push([r.candidate_id,source.employment_id,r.version_id,d.employer,d.role,d.tasks,d.start,d.end,d.current===null?'Por confirmar':d.current?'Sí':'No',d.declaredDuration,duration?`${duration.value} ${duration.unit}`:'Por confirmar',d.categories.join(' | '),sources.map(s=>s.receipt_id?'Mensaje '+s.receipt_id:'CV '+r.hash).join(' | '),source.page,sources.map(s=>s.fragment).join('\n---\n'),source.state,sources.map(s=>s.conflict).filter(Boolean).join(' | ')]);
+    }}
+    setImmediate(()=>this.build(job,preview,experienceRows).catch(e=>{job.state='error';job.error=e.message;}));return job;
+  }
+  async build(job,preview,experienceRows){
+    const target=path.join(this.repo.root,'exports',job.id+'.zip'),temp=target+'.tmp';
+    const archive=new ZipArchive({zlib:{level:6}}),output=fs.createWriteStream(temp,{flags:'wx'});
+    try{await new Promise((resolve,reject)=>{
+      output.on('close',resolve);output.on('error',reject);archive.on('error',reject);archive.on('warning',reject);archive.pipe(output);
+      const seen=new Set();for(const r of preview.rows){if(seen.has(r.hash))continue;seen.add(r.hash);archive.file(path.join(this.repo.root,'cv',r.path),{name:r.filename});}
+      archive.append(csv([['id','nombre','contacto','fecha_cv','archivo','hash','version_cv','estado_lectura'],...preview.rows.map(r=>[r.candidate_id,r.name,r.contact,r.date,r.filename,r.hash,r.version_id,r.reading])]),{name:'indice.csv'});
+      archive.append(csv(experienceRows),{name:'experiencias.csv'});
+      archive.append(`Rango horario argentino: ${preview.range.start} inclusive a ${preview.range.end} exclusivo.\n${preview.people} postulantes; ${preview.files} archivos únicos.\nLecturas pendientes o con error: ${preview.reading}. Experiencia pendiente no equivale a ausencia de experiencia.\nSHA-256 deduplica bytes idénticos; no imágenes visualmente equivalentes.\n`,{name:'LEEME.txt'});
+      archive.finalize().catch(reject);
+    });fs.renameSync(temp,target);job.state='ready';job.path=target;}catch(e){archive.abort();output.destroy();if(fs.existsSync(temp))fs.unlinkSync(temp);throw e;}
+  }
+  get(id,user){const job=this.jobs.get(id);if(!job||job.user!==user)throw error('Exportación no encontrada',404);return job;}
+}
+module.exports={ExportacionService,csv,csvCell};
+</file>
+
+<file path="lib/storage.js">
+const fs=require('fs');
+const path=require('path');
+const crypto=require('crypto');
+const digest=bytes=>crypto.createHash('sha256').update(bytes).digest('hex');
+const error=(message,status=400)=>Object.assign(new Error(message),{status});
+const now=()=>new Date().toISOString();
+const json=s=>{try{return JSON.parse(s);}catch{return null;}};
+function migrate(db,root){
+  db.exec('CREATE TABLE IF NOT EXISTS rrhh_migrations(version INTEGER PRIMARY KEY, applied TEXT)');
+  if(db.prepare('SELECT 1 FROM rrhh_migrations WHERE version=2').get()) return;
+  const backup=path.join(root,'migration-backups',Date.now()+'.sqlite');
+  fs.mkdirSync(path.dirname(backup),{recursive:true});
+  db.prepare('VACUUM INTO ?').run(backup);
+  db.transaction(()=>{
+    const existing=db.prepare('PRAGMA table_info(candidates)').all().map(c=>c.name);
+    for(const [name,type] of Object.entries({dniExtracted:"TEXT DEFAULT ''",dniConfirmed:"TEXT DEFAULT ''",birthDate:"TEXT DEFAULT ''",declaredAge:"TEXT DEFAULT ''",ageReference:"TEXT DEFAULT ''",mergedInto:'INTEGER',reviewState:"TEXT DEFAULT 'Por confirmar'"})) if(!existing.includes(name))db.exec(`ALTER TABLE candidates ADD COLUMN ${name} ${type}`);
+    db.exec(`
+      CREATE TABLE cv_files(hash TEXT PRIMARY KEY,path TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,original TEXT NOT NULL,created TEXT NOT NULL,read_state TEXT DEFAULT 'pending',read_error TEXT DEFAULT '',pages TEXT DEFAULT '[]',extracted TEXT DEFAULT '{}',extraction_version INTEGER DEFAULT 0);
+      CREATE TABLE cv_versions(id INTEGER PRIMARY KEY,candidate_id INTEGER NOT NULL REFERENCES candidates(id),hash TEXT NOT NULL REFERENCES cv_files(hash),incorporated TEXT NOT NULL,date_known INTEGER DEFAULT 1,UNIQUE(candidate_id,hash));
+      CREATE TABLE cv_receipts(id INTEGER PRIMARY KEY,account TEXT NOT NULL,chat TEXT NOT NULL,message_id TEXT NOT NULL,received TEXT NOT NULL,hash TEXT REFERENCES cv_files(hash),candidate_id INTEGER REFERENCES candidates(id),phone TEXT DEFAULT '',caption TEXT DEFAULT '',context TEXT DEFAULT '',original TEXT DEFAULT '',state TEXT DEFAULT 'pending',error TEXT DEFAULT '',attempts INTEGER DEFAULT 0,classification TEXT DEFAULT 'review',created TEXT NOT NULL,UNIQUE(account,chat,message_id));
+      CREATE TABLE chat_people(account TEXT,chat TEXT,candidate_id INTEGER REFERENCES candidates(id),PRIMARY KEY(account,chat,candidate_id));
+      CREATE TABLE person_evidence(id INTEGER PRIMARY KEY,candidate_id INTEGER REFERENCES candidates(id),version_id INTEGER REFERENCES cv_versions(id),field TEXT,value TEXT,fragment TEXT,page INTEGER,state TEXT DEFAULT 'pending',UNIQUE(version_id,field,value));
+      CREATE TABLE employment(id INTEGER PRIMARY KEY,candidate_id INTEGER REFERENCES candidates(id),match_key TEXT NOT NULL,created TEXT NOT NULL);
+      CREATE TABLE employment_sources(id INTEGER PRIMARY KEY,employment_id INTEGER REFERENCES employment(id),version_id INTEGER REFERENCES cv_versions(id),source_key TEXT NOT NULL,receipt_id INTEGER REFERENCES cv_receipts(id),page INTEGER,fragment TEXT NOT NULL,data TEXT NOT NULL,state TEXT DEFAULT 'pending',revision INTEGER DEFAULT 1,conflict TEXT DEFAULT '',UNIQUE(employment_id,source_key));
+      CREATE TABLE employment_history(id INTEGER PRIMARY KEY,source_id INTEGER REFERENCES employment_sources(id),data TEXT,state TEXT,revision INTEGER,changed TEXT,user_id INTEGER);
+      CREATE TABLE sync_jobs(id INTEGER PRIMARY KEY,account TEXT NOT NULL,start TEXT NOT NULL,end TEXT NOT NULL,state TEXT NOT NULL,chat_ids TEXT DEFAULT '[]',cursor INTEGER DEFAULT 0,progress TEXT DEFAULT '{}',created TEXT,updated TEXT);
+      CREATE TABLE legacy_document_map(document_id INTEGER PRIMARY KEY,version_id INTEGER REFERENCES cv_versions(id));
+      CREATE INDEX receipt_dates ON cv_receipts(received);
+      CREATE INDEX version_dates ON cv_versions(incorporated);
+    `);
+    // Originales heredados se mantienen; su fecha de recepción no se inventa.
+    for(const doc of db.prepare('SELECT * FROM documents').all()){
+      const filename=path.join(root,'cv',doc.path);if(!fs.existsSync(filename))continue;
+      const bytes=fs.readFileSync(filename),hash=digest(bytes),ext=path.extname(filename).toLowerCase();
+      db.prepare('INSERT OR IGNORE INTO cv_files(hash,path,mime,size,original,created,read_state,pages) VALUES (?,?,?,?,?,?,?,?)').run(hash,doc.path,ext==='.pdf'?'application/pdf':ext==='.png'?'image/png':'image/jpeg',bytes.length,doc.original,now(),doc.text?'done':'pending',JSON.stringify(doc.text?[{page:null,text:doc.text,method:'legacy'}]:[]));
+      db.prepare('INSERT OR IGNORE INTO cv_versions(candidate_id,hash,incorporated,date_known) VALUES (?,?,?,0)').run(doc.candidate_id,hash,now());
+      const version=db.prepare('SELECT id FROM cv_versions WHERE candidate_id=? AND hash=?').get(doc.candidate_id,hash);
+      db.prepare('INSERT INTO legacy_document_map VALUES (?,?)').run(doc.id,version.id);
+    }
+    db.prepare('INSERT INTO rrhh_migrations VALUES (2,?)').run(now());
+  })();
+}
+class Postulante{constructor(row){Object.assign(this,row);this.label=`Postulante N.º ${row.id}`;}}
+class DocumentoCV{constructor(row){Object.assign(this,row);}}
+class RecepcionCV{constructor(row){Object.assign(this,row);}}
+class Repositorios{
+  constructor(db,root){this.db=db;this.root=root;}
+  file(hash){return this.db.prepare('SELECT * FROM cv_files WHERE hash=?').get(hash);}
+  person(id){const p=this.db.prepare('SELECT * FROM candidates WHERE id=? AND mergedInto IS NULL').get(id);if(!p)throw error('Postulante no encontrado',404);return new Postulante(p);}
+  versions(id){return this.db.prepare('SELECT v.*,f.original,f.read_state,f.read_error,f.mime FROM cv_versions v JOIN cv_files f ON f.hash=v.hash WHERE candidate_id=? ORDER BY incorporated DESC,v.id DESC').all(id);}
+  list(){return this.db.prepare('SELECT * FROM candidates WHERE mergedInto IS NULL ORDER BY id DESC').all().map(row=>{const versions=this.versions(row.id);const receipt=this.db.prepare("SELECT min(received) first,max(received) last FROM cv_receipts WHERE candidate_id=? AND classification='cv' AND hash IS NOT NULL").get(row.id);return {...new Postulante(row),current:versions[0]||null,firstReceived:receipt.first,lastReceived:receipt.last};});}
+  log(action,user=null){this.db.prepare('INSERT INTO audit(user_id,action) VALUES (?,?)').run(user,action);}
+}
+module.exports={migrate,Repositorios,Postulante,DocumentoCV,RecepcionCV,digest,error,now,json};
+</file>
+
+<file path="lib/whatsapp.js">
+const fs=require('fs');const path=require('path');const QRCode=require('qrcode');
+const {error,now,json}=require('./storage');
+function dateRange(start,end){
+  const valid=d=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&new Date(d+'T00:00:00Z').toISOString().slice(0,10)===d;
+  if(!valid(start)||!valid(end)||start>end)throw error('Rango de fechas inválido');
+  const midnight=day=>{const base=Date.parse(day+'T00:00:00Z');let stamp=base;const formatter=new Intl.DateTimeFormat('en-GB',{timeZone:'America/Argentina/Buenos_Aires',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});for(let i=0;i<3;i++){const p=Object.fromEntries(formatter.formatToParts(new Date(stamp)).map(p=>[p.type,p.value]));const shown=Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second);stamp=base-(shown-stamp);}return new Date(stamp).toISOString();};
+  const next=new Date(Date.parse(end+'T00:00:00Z')+86400000).toISOString().slice(0,10);
+  return {start:midnight(start),end:midnight(next)};
+}
+const individual=id=>/@(?:c\.us|lid)$/.test(id||'');
+function bounded(promise,ms=90000){let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(error('WhatsApp no respondió dentro del plazo; reintentar')),ms);})]).finally(()=>clearTimeout(timer));}
+class WhatsAppService{
+  constructor(repo,cv,{clientFactory}={}){this.repo=repo;this.db=repo.db;this.cv=cv;this.clientFactory=clientFactory;this.client=null;this.state='disconnected';this.qr=null;this.account=null;this.lastError='';this.tail=Promise.resolve();this.sync=null;this.lock=path.join(repo.root,'whatsapp-client.lock');this.expected=process.env.WHATSAPP_ACCOUNT||'5491151475803';}
+  status(admin){return {state:this.state,account:this.account,expected:this.expected,qr:admin?this.qr:null,error:this.lastError,session:'Sesión exclusiva de RRHH',lastSync:this.db.prepare("SELECT updated FROM sync_jobs WHERE state='done' ORDER BY id DESC LIMIT 1").get()?.updated||null};}
+  async connect(body){
+    if(this.client||this.state==='connecting')throw error('El cliente RRHH ya está iniciado',409);
+    if(body.otherIntegration===true)throw error('Conflicto: la cuenta está administrada por otra integración. No se inició otro cliente.',409);
+    if(body.exclusiveAccount!==true)throw error('Confirmá que la cuenta prevista no está siendo administrada por otra integración');
+    if(fs.existsSync(this.lock)){const pid=Number(fs.readFileSync(this.lock,'utf8'));let alive=false;try{process.kill(pid,0);alive=true;}catch{}if(alive)throw error('Ya hay un proceso RRHH que administra esta sesión',409);fs.unlinkSync(this.lock);}
+    fs.writeFileSync(this.lock,String(process.pid),{flag:'wx'});
+    const executable=process.env.WHATSAPP_BROWSER||['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe','C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].find(p=>fs.existsSync(p));
+    if(!executable&&!this.clientFactory){fs.unlinkSync(this.lock);throw error('Configurá WHATSAPP_BROWSER con la ruta del navegador');}
+    this.state='connecting';this.lastError='';
+    try{
+      const {Client,LocalAuth}=require('whatsapp-web.js');
+      this.client=this.clientFactory?this.clientFactory():new Client({authStrategy:new LocalAuth({clientId:'rrhh',dataPath:path.join(this.repo.root,'whatsapp-auth')}),takeoverOnConflict:false,webVersionCache:{type:'local',path:path.join(this.repo.root,'whatsapp-cache')},puppeteer:{headless:true,executablePath:executable,args:['--disable-dev-shm-usage']}});
+      this.client.on('qr',qr=>{QRCode.toDataURL(qr).then(data=>{this.qr=data;this.state='qr';}).catch(e=>this.fail(e));});
+      this.client.on('authenticated',()=>{this.qr=null;this.state='authenticated';});
+      this.client.on('ready',()=>{
+        this.account=this.client.info?.wid?._serialized||'';const number=this.account.split('@')[0];
+        if(number!==this.expected){this.lastError=`Cuenta conectada ${number}; se esperaba ${this.expected}. Recepción detenida.`;this.disconnect().catch(()=>{});return;}
+        this.state='ready';this.qr=null;this.retry().catch(e=>this.fail(e));
+      });
+      this.client.on('change_state',state=>{if(state==='CONFLICT'){this.lastError='Conflicto con otra sesión. No se toma control.';this.disconnect().catch(()=>{});}});
+      this.client.on('auth_failure',message=>{this.lastError='Falló la autenticación: '+String(message);this.state='error';this.qr=null;});
+      this.client.on('disconnected',reason=>{this.state='disconnected';this.qr=null;this.lastError=String(reason);});
+      this.client.on('message',message=>{if(this.state==='ready')this.enqueue(message).catch(e=>this.fail(e));});
+      this.client.initialize().catch(async e=>{this.lastError=e.message;await this.disconnect().catch(()=>{});this.state='error';});
+    }catch(e){this.state='error';this.lastError=e.message;await this.disconnect();throw e;}
+  }
+  fail(e){this.lastError=String(e.message||e).slice(0,1000);}
+  async disconnect(){this.sync?.cancel();const client=this.client;this.client=null;this.qr=null;this.state='disconnected';if(client)await client.destroy();if(fs.existsSync(this.lock)&&fs.readFileSync(this.lock,'utf8')===String(process.pid))fs.unlinkSync(this.lock);}
+  meta(message,context=''){
+    const chat=message.from;return {account:this.account,chat,message_id:message.id?._serialized,received:new Date(message.timestamp*1000).toISOString(),phone:chat.endsWith('@c.us')?'+'+chat.split('@')[0]:'',caption:message.body||'',context};
+  }
+  enqueue(message,context=''){
+    if(message.fromMe||!individual(message.from)||!message.hasMedia)return Promise.resolve('ignored');
+    const meta=this.meta(message,context);if(!meta.message_id)return Promise.resolve('ignored');
+    this.db.prepare('INSERT OR IGNORE INTO cv_receipts(account,chat,message_id,received,phone,caption,context,created) VALUES (?,?,?,?,?,?,?,?)').run(meta.account,meta.chat,meta.message_id,meta.received,meta.phone,meta.caption,context,now());
+    const job=this.tail.then(()=>this.process(message,meta));this.tail=job.catch(()=>{});return job;
+  }
+  async process(message,meta){
+    const previous=this.db.prepare('SELECT * FROM cv_receipts WHERE account=? AND chat=? AND message_id=?').get(meta.account,meta.chat,meta.message_id);if(previous?.state==='saved'||previous?.state==='ignored')return 'duplicate';
+    try{
+      if(meta.chat.endsWith('@lid')&&this.client?.getContactLidAndPhone){try{const ids=await this.client.getContactLidAndPhone([meta.chat]);const pn=ids[0]?.pn;if(pn?.endsWith('@c.us'))meta.phone='+'+pn.split('@')[0];}catch{}}
+      let media;for(let attempt=0;attempt<3;attempt++){try{media=await bounded(message.downloadMedia(),30000);if(media)break;}catch(e){if(attempt===2)throw e;}}
+      if(!media?.data)throw error('Medio no disponible en WhatsApp; se puede reintentar');
+      if(!['application/pdf','image/jpeg','image/png'].includes(media.mimetype)){this.db.prepare("UPDATE cv_receipts SET state='ignored',classification='other',error='' WHERE id=?").run(previous.id);return 'ignored';}
+      meta.original=media.filename||('adjunto'+(media.mimetype==='application/pdf'?'.pdf':media.mimetype==='image/png'?'.png':'.jpg'));
+      if(media.data.length>22*1024*1024)throw error('Adjunto supera el límite de 15 MB');
+      const result=this.cv.receive(meta,Buffer.from(media.data,'base64'));return result.duplicate?'duplicate':'saved';
+    }catch(e){this.cv.failure(meta,e.message);return 'error';}
+  }
+  async retry(){
+    if(this.state!=='ready')throw error('WhatsApp no está conectado');
+    const pending=this.db.prepare("SELECT * FROM cv_receipts WHERE account=? AND state IN ('error','pending') ORDER BY id").all(this.account);
+    for(const r of pending){if(this.state!=='ready')break;try{const message=await this.client.getMessageById(r.message_id);if(!message)throw error('Mensaje no recuperable');await this.enqueue(message,r.context);}catch(e){this.cv.failure(r,e.message);}}
+    return {retried:pending.length};
+  }
+}
+class SincronizacionService{
+  constructor(repo,wa){this.repo=repo;this.db=repo.db;this.wa=wa;this.active=null;this.cancelled=false;this.db.prepare("UPDATE sync_jobs SET state='paused' WHERE state='running'").run();}
+  list(){return this.db.prepare('SELECT * FROM sync_jobs ORDER BY id DESC LIMIT 10').all().map(j=>({...j,progress:json(j.progress),chat_ids:undefined}));}
+  start(body){if(this.wa.state!=='ready')throw error('Primero vinculá WhatsApp');if(this.active)throw error('Hay una sincronización en curso',409);const range=dateRange(body.start,body.end);const id=this.db.prepare("INSERT INTO sync_jobs(account,start,end,state,created,updated) VALUES (?,?,?,'paused',?,?)").run(this.wa.account,range.start,range.end,now(),now()).lastInsertRowid;this.resume(id);return {id};}
+  resume(id){if(this.active)throw error('Hay una sincronización en curso',409);if(this.wa.state!=='ready')throw error('Primero vinculá WhatsApp');const job=this.db.prepare('SELECT * FROM sync_jobs WHERE id=?').get(id);if(!job||job.account!==this.wa.account)throw error('Trabajo no disponible para esta cuenta');this.cancelled=false;this.active=id;this.db.prepare("UPDATE sync_jobs SET state='running',updated=? WHERE id=?").run(now(),id);setImmediate(()=>this.run(job).catch(e=>{this.db.prepare("UPDATE sync_jobs SET state='paused',progress=?,updated=? WHERE id=?").run(JSON.stringify({...json(this.db.prepare('SELECT progress FROM sync_jobs WHERE id=?').get(id).progress),error:e.message}),now(),id);}).finally(()=>{this.active=null;}));return {id};}
+  cancel(){this.cancelled=true;}
+  async run(job){
+    let ids=json(job.chat_ids)||[];let progress=json(job.progress)||{};
+    if(!ids.length){ids=(await bounded(this.wa.client.getChats())).filter(c=>!c.isGroup&&individual(c.id._serialized)).map(c=>c.id._serialized);this.db.prepare('UPDATE sync_jobs SET chat_ids=? WHERE id=?').run(JSON.stringify(ids),job.id);}
+    const limit=Number(process.env.WHATSAPP_HISTORY_LIMIT||5000);progress.totalChats=ids.length;progress.chats=progress.chats||{};
+    for(let index=job.cursor;index<ids.length;index++){
+      if(this.cancelled||this.wa.state!=='ready')break;
+      const chatId=ids[index];let stats={messages:0,saved:0,duplicate:0,errors:0,ignored:0};
+      try{
+        const chat=await bounded(this.wa.client.getChatById(chatId));const messages=await bounded(chat.fetchMessages({limit}));
+        stats.recovered=messages.length;stats.oldest=messages.length?new Date(Math.min(...messages.map(m=>m.timestamp))*1000).toISOString():null;stats.limitReached=messages.length>=limit;
+        stats.coverage='Sólo historial devuelto por WhatsApp; no garantiza totalidad';
+        for(let i=0;i<messages.length;i++){
+          if(this.cancelled||this.wa.state!=='ready')break;
+          const m=messages[i],stamp=new Date(m.timestamp*1000).toISOString();if(stamp<job.start||stamp>=job.end)continue;stats.messages++;
+          const result=await this.wa.enqueue(m,messages.slice(Math.max(0,i-2),i).filter(x=>!x.fromMe&&!x.hasMedia).map(x=>x.body).join('\n').slice(0,12000));
+          stats[result==='error'?'errors':result]=(stats[result==='error'?'errors':result]||0)+1;
+          progress.chats[chatId]=stats;this.db.prepare('UPDATE sync_jobs SET progress=?,updated=? WHERE id=?').run(JSON.stringify(progress),now(),job.id);
+        }
+      }catch(e){stats.errors++;stats.error=e.message;}
+      progress.chats[chatId]=stats;if(stats.error)this.cancelled=true;const complete=!this.cancelled&&this.wa.state==='ready';
+      this.db.prepare('UPDATE sync_jobs SET cursor=?,progress=?,updated=? WHERE id=?').run(complete?index+1:index,JSON.stringify(progress),now(),job.id);
+    }
+    this.db.prepare('UPDATE sync_jobs SET state=?,updated=? WHERE id=?').run(this.cancelled||this.wa.state!=='ready'?'paused':'done',now(),job.id);
+  }
+}
+module.exports={WhatsAppService,SincronizacionService,dateRange,individual};
+</file>
+
+<file path="public/reception.js">
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let people=[],me,view='whatsapp',needsSetup=false,poll;
+const date=s=>s?new Date(s).toLocaleString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'}):'Por confirmar';
+const stateLabel=s=>({done:'Lectura lista',partial:'Lectura parcial',pending:'Pendiente',reading:'Leyendo',error:'Error: revisar',ready:'Conectado',disconnected:'Desconectado',connecting:'Conectando',authenticated:'Autenticado',qr:'Esperando escaneo',saved:'Guardado',paused:'Pausado',running:'En curso'}[s]||s);
+const day=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Buenos_Aires'}).format(new Date());
+async function api(url,options={}){const r=await fetch('/api'+url,{...options,headers:options.body instanceof FormData?{}:{'Content-Type':'application/json'},body:options.body instanceof FormData?options.body:options.body?JSON.stringify(options.body):undefined});const data=await r.json();if(!r.ok){if(r.status===401&&url!=='/login')showLogin();throw Error(data.error||'No se pudo completar la operación');}return data;}
+function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').hidden=true,7000);}
+function bind(selector,event,fn){$(selector)?.addEventListener(event,async e=>{try{await fn(e);}catch(err){toast(err.message);}});}
+function buttons(selector,fn){document.querySelectorAll(selector).forEach(b=>b.onclick=()=>Promise.resolve(fn(b)).catch(e=>toast(e.message)));}
+function modal(html){$('#modalContent').innerHTML=html;if(!$('#modal').open)$('#modal').showModal();bind('#closeModal','click',()=>$('#modal').close());}
+const head=title=>`<div class="modal-head"><h2>${esc(title)}</h2><button type="button" id="closeModal" aria-label="Cerrar">×</button></div>`;
+const opts=(items,current)=>items.map(x=>`<option ${x===current?'selected':''}>${esc(x)}</option>`).join('');
+async function showLogin(){clearInterval(poll);needsSetup=(await api('/auth')).needsSetup;$('#app').hidden=true;$('#login').hidden=false;$('#setupLabel').hidden=!needsSetup;$('#loginButton').textContent=needsSetup?'Crear administrador':'Ingresar';}
+bind('#loginForm','submit',async e=>{e.preventDefault();const body=Object.fromEntries(new FormData(e.target));try{if(needsSetup)await api('/setup',{method:'POST',body});await api('/login',{method:'POST',body});e.target.reset();await boot();}catch(err){$('#loginError').textContent=err.message;}});
+bind('#logout','click',async()=>{await api('/logout',{method:'POST'});$('#modal').close();await showLogin();});
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;render().catch(e=>toast(e.message));}));
+async function boot(){me=await api('/me');$('#identity').textContent=me.username;$('#login').hidden=true;$('#app').hidden=false;await render();}
+async function render(){clearInterval(poll);document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('#breadcrumb').textContent={candidates:'Postulantes y CV',whatsapp:'WhatsApp y sincronización',downloads:'Descargas por fecha',settings:'Configuración'}[view];await ({candidates:renderPeople,whatsapp:renderWhatsApp,downloads:renderDownloads,settings:renderSettings}[view])();}
+const heading=(title,sub,buttons='')=>`<div class="heading"><div><h1>${title}</h1><p>${sub}</p></div><div class="actions">${buttons}</div></div>`;
+async function renderWhatsApp(){
+  $('#content').innerHTML=heading('Cada CV, en su lugar.','Vinculá la cuenta de RRHH y recuperá las postulaciones disponibles.')+`<div class="panel"><h2>Conexión de WhatsApp</h2><div id="waStatus"></div>${me.role==='admin'?`<form id="connectForm"><label class="checkline"><input type="checkbox" name="exclusive" required> Verifiqué que +54 9 11 5147-5803 no está administrado por otra integración.</label><div class="toolbar"><button class="primary">Iniciar conexión / mostrar QR</button><button type="button" id="disconnect">Desconectar RRHH</button></div></form><div id="qr"></div>`:'<p>Un administrador debe vincular la cuenta.</p>'}</div>${me.role==='admin'?`<div class="panel"><h2>Sincronización histórica</h2><p class="muted">Chats individuales. Se recupera el historial que WhatsApp permite consultar, hasta el límite configurado por chat.</p><form id="syncForm" class="form-grid"><label>Desde<input type="date" name="start" required value="${day()}"></label><label>Hasta<input type="date" name="end" required value="${day()}"></label><div class="toolbar wide"><button class="primary">Sincronizar rango</button><button type="button" id="cancelSync">Pausar</button><button type="button" id="retryMedia">Reintentar medios pendientes</button></div></form><div id="syncStatus"></div></div>`:''}<div class="panel"><h2>Adjuntos por revisar</h2><p class="muted">Los archivos dudosos se conservan hasta que confirmes si son CV y a quién pertenecen.</p><div id="receipts"></div></div>`;
+  bind('#connectForm','submit',async e=>{e.preventDefault();await api('/whatsapp/connect',{method:'POST',body:{exclusiveAccount:e.target.elements.exclusive.checked}});await updateWhatsApp();});
+  bind('#disconnect','click',async()=>{await api('/whatsapp/disconnect',{method:'POST'});await updateWhatsApp();});
+  bind('#syncForm','submit',async e=>{e.preventDefault();await api('/sync',{method:'POST',body:Object.fromEntries(new FormData(e.target))});await updateWhatsApp();});
+  bind('#cancelSync','click',()=>api('/sync/cancel',{method:'POST'}));bind('#retryMedia','click',async()=>{await api('/whatsapp/retry',{method:'POST'});toast('Reintento iniciado en segundo plano');});
+  await updateWhatsApp();poll=setInterval(()=>{if(!$('#modal').open)updateWhatsApp().catch(e=>toast(e.message));},4000);
+}
+async function updateWhatsApp(){
+  const [status,receipts]=await Promise.all([api('/whatsapp'),api('/receipts')]);if(view!=='whatsapp')return;
+  $('#waStatus').innerHTML=`<p><span class="badge">${esc(stateLabel(status.state))}</span> Cuenta: ${esc(status.account||'Sin vincular')} · Última sincronización: ${date(status.lastSync)}</p>${status.error?`<div class="notice">${esc(status.error)}</div>`:''}`;
+  if($('#qr'))$('#qr').innerHTML=status.qr?`<img class="qr" src="${esc(status.qr)}" alt="QR real para vincular WhatsApp"><p class="muted">WhatsApp → Dispositivos vinculados → Vincular un dispositivo.</p>`:'';
+  if(me.role==='admin'){
+    const jobs=await api('/sync');if(view!=='whatsapp')return;$('#syncStatus').innerHTML=jobs.map(j=>{const chats=Object.values(j.progress?.chats||{}),sum=k=>chats.reduce((n,c)=>n+(c[k]||0),0);return `<div class="notice"><strong>Trabajo ${j.id}: ${esc(stateLabel(j.state))}</strong> · ${j.cursor}/${j.progress?.totalChats||0} chats revisados<br>${sum('recovered')} mensajes recuperados · ${sum('saved')} adjuntos guardados · ${sum('duplicate')} duplicados · ${sum('errors')} errores<br>${chats.filter(c=>c.limitReached).length} chats alcanzaron el límite de consulta. ${j.state==='paused'?`<button data-resume="${j.id}">Reanudar</button>`:''}<details><summary>Cobertura y errores por chat</summary><pre>${esc(JSON.stringify(j.progress,null,2))}</pre></details></div>`;}).join('')||'<p class="muted">Todavía no se realizaron sincronizaciones.</p>';buttons('[data-resume]',b=>api(`/sync/${b.dataset.resume}/resume`,{method:'POST'}));
+  }
+  $('#receipts').innerHTML=receipts.length?`<div class="table-wrap"><table><thead><tr><th>Recepción</th><th>Origen</th><th>Archivo / estado</th><th></th></tr></thead><tbody>${receipts.map(r=>`<tr><td>${date(r.received)}</td><td>${esc(r.phone||r.chat)}</td><td>${esc(r.original||'Sin descargar')}<small class="block">${esc(r.error||r.read_state||r.state)}</small></td><td><button data-resolve="${r.id}">Revisar</button></td></tr>`).join('')}</tbody></table></div>`:'<p class="muted">No hay adjuntos pendientes de asociación.</p>';
+  buttons('[data-resolve]',b=>resolveReceipt(receipts.find(r=>r.id===Number(b.dataset.resolve))));
+}
+async function resolveReceipt(r){people=await api('/candidates');modal(head('Revisar recepción')+`<p>${esc(r.chat)} · ${date(r.received)}<br>Mensaje: ${esc(r.message_id)}</p><pre>${esc([r.caption,r.context].filter(Boolean).join('\n'))}</pre>${r.hash?`<a href="/api/files/${r.hash}">Descargar original</a>`:''}<form id="resolveForm" class="form-grid"><label>Acción<select name="action"><option value="associate">Asociar a postulante existente</option><option value="new">Crear una ficha diferente</option><option value="other">No corresponde a una postulación</option></select></label><label>Postulante existente<select name="candidate_id">${people.map(p=>`<option value="${p.id}">N.º ${p.id} · ${esc(p.name)}</option>`).join('')}</select></label><label class="wide">Nombre, sólo para ficha nueva<input name="name" placeholder="Nombre por confirmar"></label><button class="primary wide">Guardar resolución</button></form>`);bind('#resolveForm','submit',async e=>{e.preventDefault();await api(`/receipts/${r.id}/resolve`,{method:'POST',body:Object.fromEntries(new FormData(e.target))});$('#modal').close();await updateWhatsApp();});}
+async function renderPeople(){people=await api('/candidates');$('#content').innerHTML=heading('Postulantes y currículums.','Una ficha por persona, con versiones y recepciones trazables.','<button id="newPerson" class="primary">+ Nuevo postulante</button><button id="reload">Actualizar</button>')+`<div class="stats"><div class="stat"><small>Postulantes</small><strong>${people.length}</strong><span>Fichas únicas</span></div><div class="stat"><small>Con CV</small><strong>${people.filter(p=>p.current).length}</strong><span>Original disponible</span></div><div class="stat"><small>Por incorporar</small><strong>${people.filter(p=>!p.current).length}</strong><span>Sin archivo adjunto</span></div><div class="stat"><small>Lectura pendiente</small><strong>${people.filter(p=>p.current&&p.current.read_state!=='done').length}</strong><span>El CV se puede descargar</span></div></div><div class="panel"><input id="search" aria-label="Buscar postulantes" placeholder="Buscar por número, nombre, DNI o contacto"><div id="peopleRows"></div></div>`;bind('#newPerson','click',()=>personForm());bind('#reload','click',renderPeople);bind('#search','input',drawPeople);drawPeople();}
+function drawPeople(){const q=$('#search').value.toLowerCase();const filtered=people.filter(p=>[p.id,p.name,p.phone,p.cvPhone,p.dniConfirmed,p.dniExtracted].join(' ').toLowerCase().includes(q));$('#peopleRows').innerHTML=`<div class="table-wrap"><table><thead><tr><th>Postulante</th><th>Contacto / DNI</th><th>Localidad / licencia</th><th>Primera recepción</th><th>CV vigente</th><th></th></tr></thead><tbody>${filtered.map(p=>`<tr><td><strong>N.º ${p.id}</strong> · ${esc(p.name)}</td><td>${esc(p.cvPhone||p.phone||'Por confirmar')}<small class="block">DNI: ${esc(p.dniConfirmed||p.dniExtracted||'Por confirmar')}</small></td><td>${esc(p.locality||'Por confirmar')}<small class="block">${esc(p.license||'Licencia por confirmar')}</small></td><td>${date(p.firstReceived)}</td><td>${p.current?`${p.current.date_known?date(p.current.incorporated):'Fecha por confirmar'}<small class="block">${esc(stateLabel(p.current.read_state))}</small>`:'Sin CV'}</td><td><button data-person="${p.id}">Ver ficha</button> ${p.current?`<a href="/api/files/${p.current.hash}">Descargar CV</a>`:''}</td></tr>`).join('')}</tbody></table></div>`;buttons('[data-person]',b=>personForm(Number(b.dataset.person)));}
+async function personForm(id){
+  const p=id?await api('/people/'+id):{name:'',versions:[],experiences:[],evidence:[],receipts:[],categories:[]};const current=p.versions[0];
+  const input=(key,label,type='text')=>`<label>${label}<input name="${key}" type="${type}" value="${esc(p[key])}"></label>`;
+  modal(head(id?`Postulante N.º ${id}`:'Nuevo postulante')+`<form id="personForm"><div class="form-grid">${input('name','Nombre completo')}${input('dniConfirmed','DNI confirmado')}${input('phone','WhatsApp del chat')}${input('cvPhone','Teléfono del CV')}${input('birthDate','Nacimiento declarado')}${input('declaredAge','Edad declarada')}${input('ageReference','Fecha de referencia de la edad','date')}${input('locality','Localidad')}${input('address','Domicilio')}${input('license','Licencia declarada')}${input('licenseExpiry','Vencimiento de licencia','date')}<label>Revisión de la ficha<select name="reviewState">${opts(['Por confirmar','Confirmado manualmente'],p.reviewState)}</select></label><label class="wide">Observaciones<textarea name="notes">${esc(p.notes)}</textarea></label></div><div class="form-actions"><button class="primary">Guardar datos</button></div></form>${id?`<hr><h3>Datos extraídos y fuentes</h3><p class="muted">DNI extraído: ${esc(p.dniExtracted||'Por confirmar')}. Los originales permanecen separados de los datos corregidos.</p>${p.evidence.map(e=>`<details><summary>${esc(e.field)}: ${esc(e.value)} · CV ${e.version_id}, página ${e.page??'por confirmar'}</summary><pre>${esc(e.fragment)}</pre></details>`).join('')||'<p class="muted">Sin atributos extraídos.</p>'}<hr><h3>CV vigente</h3>${current?`<p><a href="/api/files/${current.hash}">${esc(current.original)}</a> · ${current.date_known?date(current.incorporated):'Fecha de recepción por confirmar'}</p>`:'<p>Sin CV adjunto.</p>'}<form id="uploadForm" class="form-grid"><label>CV (PDF, JPG, PNG, hasta 15 MB)<input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png" required></label><label>Fecha original de recepción<input type="datetime-local" name="received" required></label><button class="primary wide">Guardar CV y procesar en segundo plano</button></form><details><summary>Versiones de CV (${p.versions.length})</summary>${p.versions.map(v=>`<p>Versión ${v.id} · ${date(v.incorporated)} · ${esc(stateLabel(v.read_state))}<br><a href="/api/files/${v.hash}">Descargar original</a> <button data-text="${v.hash}">Leer texto</button> <button data-retry="${v.hash}">Reintentar lectura</button><small class="block">${esc(v.read_error)}</small></p>`).join('')}</details><details><summary>Recepciones (${p.receipts.length})</summary>${p.receipts.map(r=>`<p>${date(r.received)} · ${esc(r.phone||r.chat)}<small class="block">Mensaje: ${esc(r.message_id)}</small></p>`).join('')}</details><hr><h3>Experiencia laboral</h3><p class="muted">La lectura es orientativa. Revisá cada empleo y su fuente antes de confirmar.</p><button id="addExperience">+ Agregar empleo</button><div id="experiences"></div><details><summary>Texto original de experiencia conservado</summary><pre>${esc(p.experience||'Experiencia no informada')}</pre></details><details><summary>Duración por categoría del CV vigente</summary><p class="muted">Días calculados con fechas completas, sin duplicar períodos superpuestos. Los períodos incompletos no se suman.</p><pre>${esc(JSON.stringify(p.totals,null,2))}</pre></details>${me.role==='admin'?`<hr><button id="merge">Revisar unión con otra ficha</button>${p.matches.length?`<p class="notice">Coincidencias de DNI por revisar: ${p.matches.map(m=>'N.º '+m.id+' '+esc(m.name)).join(', ')}</p>`:''}`:''}`:''}`);
+  bind('#personForm','submit',async e=>{e.preventDefault();const body={...p,...Object.fromEntries(new FormData(e.target))};body.name=body.name||'Nombre por confirmar';await api(id?'/candidates/'+id:'/candidates',{method:id?'PUT':'POST',body});$('#modal').close();if(view==='candidates')await renderPeople();toast('Ficha guardada');});
+  if(!id)return;
+  bind('#uploadForm','submit',async e=>{e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;try{const form=new FormData(e.target);form.set('received',form.get('received')+':00-03:00');await api(`/candidates/${id}/documents`,{method:'POST',body:form});await personForm(id);toast('CV guardado. La lectura continúa en segundo plano.');}finally{button.disabled=false;}});
+  buttons('[data-retry]',async b=>{await api('/files/'+b.dataset.retry+'/retry',{method:'POST'});toast('Lectura programada');});
+  buttons('[data-text]',async b=>{const r=await api('/files/'+b.dataset.text+'/text');modal(head('Texto del CV')+`<button id="backPerson">Volver a la ficha</button>${r.pages.map(p=>`<h3>Página ${p.page??'por confirmar'} · ${esc(p.method)}</h3><pre>${esc(p.text)}</pre>`).join('')}<p>${esc(r.error)}</p>`);bind('#backPerson','click',()=>personForm(id));});
+  const groups=new Map();for(const s of p.experiences){if(!groups.has(s.employment_id))groups.set(s.employment_id,[]);groups.get(s.employment_id).push(s);}
+  $('#experiences').innerHTML=groups.size?[...groups].map(([job,sources])=>`<div class="employment"><h3>Empleo ${job}</h3>${sources.map(s=>`<details ${s.version_id===current?.id?'open':''}><summary>${esc(s.data.employer||'Empleador por confirmar')} · ${esc(s.data.role||'Puesto por confirmar')} · ${s.version_id?'CV '+s.version_id:'Carga manual'}</summary><p>${esc(s.data.tasks||'Tareas por confirmar')}</p><p>${esc(s.data.start||'Inicio por confirmar')} → ${esc(s.data.end||(s.data.current?'Actualidad':'Finalización por confirmar'))}</p><p>${esc(s.data.categories.join(' · ')||'Categorías por confirmar')}</p><span class="badge">${s.state==='confirmed'?'Confirmado manualmente':'Extraído / pendiente de revisión'}</span>${s.conflict?`<p class="notice">${esc(s.conflict)}</p>`:''}<pre>${esc(s.fragment)}</pre><small>Página: ${s.page??'por confirmar'} · Duración declarada: ${esc(s.data.declaredDuration||'Por confirmar')}<br>Duración calculada: ${s.duration?esc(s.duration.value+' '+s.duration.unit):'Por confirmar'}</small><p><button data-experience="${s.id}">Corregir / confirmar</button></p><details><summary>Historial de correcciones (${s.history.length})</summary><pre>${esc(JSON.stringify(s.history,null,2))}</pre></details></details>`).join('')}</div>`).join(''):'<p>Experiencia no informada.</p>';
+  bind('#addExperience','click',()=>experienceForm(p));buttons('[data-experience]',b=>experienceForm(p,p.experiences.find(s=>s.id===Number(b.dataset.experience))));
+  bind('#merge','click',()=>mergeForm(p));
+}
+function experienceForm(p,source){const d=source?.data||{};const input=(key,label)=>`<label>${label}<input name="${key}" value="${esc(d[key])}"></label>`;modal(head(source?'Corregir experiencia':'Agregar experiencia laboral')+`<form id="experienceForm"><div class="form-grid">${input('employer','Empresa o empleador')}${input('role','Puesto o cargo')}<label class="wide">Tareas declaradas<textarea name="tasks">${esc(d.tasks)}</textarea></label>${input('start','Inicio: AAAA, AAAA-MM o AAAA-MM-DD')}${input('end','Finalización con precisión disponible')}<label>¿Continúa trabajando allí?<select name="current">${opts(['Por confirmar','Sí','No'],d.current===true?'Sí':d.current===false?'No':'Por confirmar')}</select></label>${input('declaredDuration','Duración declarada')}<label class="wide">Fuente CV<select name="version_id" ${source?.version_id?'disabled':''}>${p.versions.map(v=>`<option value="${v.id}" ${v.id===source?.version_id?'selected':''}>Versión ${v.id} · ${esc(v.original)}</option>`).join('')||'<option value="">Sin CV; no se exporta hasta asociar una versión</option>'}</select></label><label class="wide">Fragmento de respaldo<textarea name="fragment" ${source?'readonly':''}>${esc(source?.fragment||'')}</textarea></label><fieldset class="wide"><legend>Categorías respaldadas por las tareas</legend>${p.categories.map(c=>`<label class="checkline"><input type="checkbox" name="categories" value="${esc(c)}" ${d.categories?.includes(c)?'checked':''}>${c}</label>`).join('')}</fieldset><label class="checkline wide"><input type="checkbox" name="confirm"> Confirmé estos datos con la fuente</label></div><div class="form-actions"><button type="button" id="backPerson">Volver</button><button class="primary">Guardar experiencia</button></div></form>`);bind('#backPerson','click',()=>personForm(p.id));bind('#experienceForm','submit',async e=>{e.preventDefault();const f=new FormData(e.target),data=Object.fromEntries(f);data.categories=f.getAll('categories');data.current=data.current==='Sí'?true:data.current==='No'?false:null;await api('/people/'+p.id+'/experiences',{method:'POST',body:{id:source?.id,revision:source?.revision,data,fragment:data.fragment,version_id:data.version_id||null,confirm:f.has('confirm')}});await personForm(p.id);});}
+async function mergeForm(p){const all=await api('/candidates');modal(head('Unión explícita de fichas')+`<p>La ficha N.º ${p.id} se conservará como antecedente. Sus documentos, fuentes y recepciones pasarán a la ficha elegida. Verificá que se trate de la misma persona.</p><form id="mergeForm"><label>Ficha de destino<select name="target">${all.filter(x=>x.id!==p.id).map(x=>`<option value="${x.id}">N.º ${x.id} · ${esc(x.name)}</option>`).join('')}</select></label><label class="checkline"><input type="checkbox" required> Revisé las identidades y confirmo la unión.</label><button class="primary">Unir fichas conservando historial</button></form>`);bind('#mergeForm','submit',async e=>{e.preventDefault();const target=Number(e.target.elements.target.value),b=all.find(x=>x.id===target);await api('/people/'+p.id+'/merge',{method:'POST',body:{target,versions:{from:p.version,to:b.version}}});await personForm(target);});}
+async function renderDownloads(){
+  $('#content').innerHTML=heading('Descargá los CV por fecha.','Una versión por postulante, sin repetir archivos idénticos.')+`<div class="panel"><form id="downloadForm"><div class="form-grid"><label>Desde<input type="date" name="start" required value="${day()}"></label><label>Hasta<input type="date" name="end" required value="${day()}"></label><label class="wide">Qué incluir<select name="mode"><option value="new">Postulantes nuevos</option><option value="updated">CV nuevos o actualizados</option></select></label></div><p class="muted">Postulantes nuevos: primera recepción dentro del rango. CV nuevos o actualizados: versión incorporada en el rango. Los reenvíos idénticos no cuentan como novedades. Se incluye la última versión existente al cierre del día final, en horario argentino.</p><button class="primary">Vista previa</button></form><div id="exportPreview"></div></div>`;
+  bind('#downloadForm','submit',async e=>{e.preventDefault();const body=Object.fromEntries(new FormData(e.target));const result=await api('/exports/preview',{method:'POST',body});$('#exportPreview').innerHTML=`<h3>${result.people} postulantes · ${result.files} archivos únicos</h3><p>${result.unresolved} adjuntos pendientes de resolución · ${result.missing.length} originales faltantes · ${result.reading} lecturas pendientes o con error.</p><p class="muted">El ZIP contiene los CV, indice.csv y experiencias.csv. Una lectura pendiente no impide descargar el original.</p>${result.rows.map(r=>`<p>N.º ${r.candidate_id} · ${esc(r.name)} · ${date(r.date)}</p>`).join('')}<button id="createExport" class="primary" ${result.unresolved||result.missing.length?'disabled':''}>Generar ZIP</button><div id="exportState"></div>`;bind('#createExport','click',async e=>{e.target.disabled=true;try{const job=await api('/exports',{method:'POST',body});const update=async()=>{const r=await api('/exports/'+job.id);if(!$('#exportState'))return;$('#exportState').innerHTML=r.state==='ready'?`<p><a class="download-link" href="/api/exports/${r.id}/download">Descargar ZIP listo</a></p>`:r.state==='error'?`<p class="error">${esc(r.error)}</p>`:'<p>Generando ZIP en segundo plano…</p>';if(r.state!=='building')clearInterval(poll);};await update();poll=setInterval(()=>update().catch(e=>toast(e.message)),1500);}catch(err){e.target.disabled=false;throw err;}});});
+}
+async function renderSettings(){$('#content').innerHTML=heading('Configuración.','Usuarios, almacenamiento y copias de seguridad.')+`<div class="panel"><h2>Servidor RRHH</h2><p>SQLite y CV originales en el servidor. OCR local; sin servicios externos de lectura.</p><p class="muted">WhatsApp usa una sesión exclusiva de RRHH. El navegador puede configurarse con WHATSAPP_BROWSER. No se envían mensajes.</p></div>${me.role==='admin'?`<div class="panel"><h2>Nuevo usuario</h2><form id="userForm" class="form-grid"><label>Usuario<input name="username" required></label><label>Contraseña (12 caracteres mínimo)<input name="password" type="password" minlength="12" required></label><button class="primary">Crear usuario</button></form></div><div class="panel"><h2>Copia de seguridad</h2><button id="backup">Crear copia de base y CV</button><p id="backupResult"></p></div>`:''}`;bind('#userForm','submit',async e=>{e.preventDefault();await api('/users',{method:'POST',body:Object.fromEntries(new FormData(e.target))});e.target.reset();toast('Usuario creado');});bind('#backup','click',async()=>{$('#backupResult').textContent=(await api('/backup',{method:'POST'})).path;});}
+boot().catch(()=>showLogin());
+</file>
+
+<file path="scripts/browser-reception.js">
+const {chromium}=require('@playwright/test');const fs=require('fs');const os=require('os');const path=require('path');const assert=require('assert/strict');const {execFileSync}=require('child_process');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-ui-'));process.env.DATA_DIR=dir;
+const {app,db,services}=require('../server');
+(async()=>{const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const browser=await chromium.launch({channel:'msedge',headless:true});
+try{
+ const page=await browser.newPage({viewport:{width:1440,height:1000},acceptDownloads:true});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(`http://127.0.0.1:${server.address().port}`);await page.getByLabel('Clave de instalación').fill(fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8'));await page.getByLabel('Usuario',{exact:true}).fill('admin');await page.getByLabel('Contraseña',{exact:true}).fill('prueba-ui-segura-123');await page.getByRole('button',{name:'Crear administrador'}).click();
+ await page.getByRole('heading',{name:'Conexión de WhatsApp'}).waitFor();assert.equal(await page.locator('.qr').count(),0);
+ await page.getByRole('button',{name:'Postulantes y CV',exact:true}).click();await page.getByRole('button',{name:'Nuevo postulante'}).click();await page.getByLabel('Nombre completo').fill('Persona de prueba');await page.getByRole('button',{name:'Guardar datos'}).click();await page.getByRole('button',{name:'Ver ficha',exact:true}).click();
+ const pdf=path.join(dir,'CV-prueba.pdf');execFileSync('python',['-c',"import pymupdf,sys; d=pymupdf.open();p=d.new_page();p.insert_text((40,50),'Nombre: Persona de prueba\\nExperiencia laboral:\\nEmpresa: Ejemplo\\nPuesto: Repartidor\\nTareas: reparto y cobranza\\n2020-01-01 a 2021-01-01\\n\\nEducacion\\nSecundario');d.save(sys.argv[1])",pdf],{windowsHide:true});
+ await page.locator('#uploadForm input[type=file]').setInputFiles(pdf);await page.getByLabel('Fecha original de recepción').fill('2026-09-09T12:00');await page.getByRole('button',{name:'Guardar CV y procesar'}).click();await page.getByRole('heading',{name:'CV vigente',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Agregar empleo'}).click();await page.getByLabel('Empresa o empleador').fill('Empresa de prueba');await page.getByLabel('Puesto o cargo').fill('Operario');await page.getByLabel('Tareas declaradas').fill('Carga y descarga de mercaderia');await page.getByLabel('Carga y descarga',{exact:true}).check();await page.getByRole('button',{name:'Guardar experiencia'}).click();await page.getByRole('heading',{name:'Experiencia laboral',exact:true}).waitFor();
+ assert.ok(await page.locator('#experiences').textContent());await page.screenshot({path:path.join(__dirname,'../data/ficha-recepcion.png'),fullPage:true});
+ await page.getByRole('button',{name:'Cerrar',exact:true}).click();await page.getByRole('button',{name:'Descargas por fecha',exact:true}).click();await page.getByLabel('Desde',{exact:true}).fill('2026-09-09');await page.getByLabel('Hasta',{exact:true}).fill('2026-09-10');await page.getByRole('button',{name:'Vista previa'}).click();await page.getByRole('button',{name:'Generar ZIP'}).click();await page.getByRole('link',{name:'Descargar ZIP listo'}).waitFor();
+ const downloadEvent=page.waitForEvent('download');await page.getByRole('link',{name:'Descargar ZIP listo'}).click();const download=await downloadEvent;assert.equal(await download.failure(),null);
+ await page.getByRole('button',{name:'Postulantes y CV',exact:true}).click();await page.getByRole('button',{name:'Ver ficha',exact:true}).waitFor();await page.screenshot({path:path.join(__dirname,'../data/panel-recepcion.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:path.join(__dirname,'../data/panel-recepcion-movil.png'),fullPage:true});assert.deepEqual(errors,[]);
+ console.log('UI OK: acceso, navegación, ficha, CV real, empleo, ZIP descargado, escritorio y móvil. No se inició WhatsApp.');
+}finally{await browser.close();services.extraction.stopped=true;while(services.extraction.running)await new Promise(r=>setTimeout(r,50));await services.close();await new Promise(r=>server.close(r));db.close();fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
+</file>
+
+<file path="test/reception.test.js">
+const {test,after}=require('node:test');const assert=require('node:assert/strict');const fs=require('fs');const os=require('os');const path=require('path');
+process.env.DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-reception-'));
+const {db,services}=require('../server');const {repo,cv,extraction,identity,experience,exports:exportsService}=services;cv.extraction=null;
+const {categories,ExperienciaLaboral}=require('../lib/experience');const {dateRange}=require('../lib/whatsapp');const {csvCell}=require('../lib/export');
+const zip=require('jszip');
+const bytes=n=>Buffer.from('%PDF-1.7\nfixture '+n);
+const page=(name,job='')=>[{page:1,text:`Nombre: ${name}\nDNI: 12345678\nExperiencia laboral:\n${job}\n\nEducación\nSecundario`,method:'fixture'}];
+const job='Empresa: Ejemplo\nPuesto: Repartidor\nTareas: repartía mercadería, atendía clientes y cobraba\n2020-01-01 a 2021-01-01';
+function receive(n,{chat='111@c.us',stamp='2026-09-09T12:00:00-03:00',file='a',candidate,caption='Mi CV'}={}){return cv.receive({account:'test',chat,message_id:n,received:stamp,original:'CV.pdf',caption,candidate_id:candidate,isCV:true},bytes(file)).receipt;}
+async function read(r,pages){db.prepare("UPDATE cv_files SET read_state='done',pages=?,extracted=? WHERE hash=?").run(JSON.stringify(pages),JSON.stringify(require('../lib/cv').extractFields(pages)),r.hash);await extraction.process(r.hash);return db.prepare('SELECT * FROM cv_receipts WHERE id=?').get(r.id);}
+test('Recepciones, versiones cronológicas, identidad conservadora, fuentes y ZIP por fecha',async()=>{
+ let r=await read(receive('m1'),page('Persona Uno',job));const id=r.candidate_id;assert.ok(id);
+ for(let n=2;n<=10;n++)receive('m'+n);await extraction.process(r.hash);
+ assert.equal(repo.list().length,1);assert.equal(db.prepare('SELECT count(*) n FROM cv_files').get().n,1);assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,10);
+ receive('m1');assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,10);
+ const original=repo.versions(id)[0];assert.equal(experience.list(id).length,1);
+ const s=experience.list(id)[0];experience.save(id,{id:s.id,revision:s.revision,data:{...s.data,tasks:'Corrección manual'},confirm:true},1);
+ await extraction.process(r.hash);assert.equal(experience.list(id)[0].data.tasks,'Corrección manual');assert.equal(experience.list(id)[0].history.length,1);
+ let updated=await read(receive('updated',{stamp:'2026-09-10T23:59:59-03:00',file:'b'}),page('Persona Uno',job.replace('2021-01-01','2022-01-01')));
+ assert.equal(updated.candidate_id,id);assert.equal(repo.versions(id).length,2);assert.equal(experience.list(id).length,2);assert.ok(experience.list(id)[1].conflict);
+ await read(receive('old',{stamp:'2026-09-08T12:00:00-03:00',file:'old'}),page('Persona Uno',job));assert.equal(repo.versions(id)[0].hash,updated.hash);
+ receive('resend',{stamp:'2026-09-11T12:00:00-03:00',file:'a'});await extraction.process(r.hash);assert.equal(repo.versions(id)[0].hash,updated.hash);
+ await read(receive('future',{stamp:'2026-09-11T14:00:00-03:00',file:'future'}),page('Persona Uno',job));
+ let preview=exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'updated'});assert.equal(preview.people,1);assert.equal(preview.rows[0].hash,updated.hash);
+ assert.equal(exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'new'}).people,0);
+ const other=await read(receive('other-person',{chat:'222@lid',file:'b',caption:'CV de mi hermano'}),page('Persona Uno',job));assert.equal(other.candidate_id,null);assert.equal(db.prepare('SELECT count(*) n FROM cv_files').get().n,4);
+ const separate=identity.createForReceipt(other,{name:{value:'Persona Dos'}});await extraction.process(other.hash);assert.notEqual(separate.candidate_id,id);
+ const conflict=await read(receive('third',{file:'third'}),page('Otra Persona',job));assert.equal(conflict.candidate_id,null);
+ db.prepare("UPDATE cv_receipts SET classification='other' WHERE id=?").run(conflict.id);
+ preview=exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'updated'});assert.equal(preview.people,2);assert.equal(preview.files,1);
+ const task=exportsService.start({start:'2026-09-09',end:'2026-09-10',mode:'updated'},1);
+ while(task.state==='building')await new Promise(r=>setTimeout(r,10));assert.equal(task.state,'ready',task.error);
+ const archive=await zip.loadAsync(fs.readFileSync(task.path));assert.equal(Object.keys(archive.files).filter(n=>n.endsWith('.pdf')).length,1);
+ const csv=await archive.file('experiencias.csv').async('string');assert.ok(csv.includes('2022-01-01'));assert.ok(csv.includes('Reparto'));assert.equal(csv.includes('Corrección manual'),false);
+ const task2=exportsService.start({start:'2026-09-09',end:'2026-09-10',mode:'updated'},1);while(task2.state==='building')await new Promise(r=>setTimeout(r,10));assert.equal(task2.state,'ready');
+ assert.equal(original.incorporated,'2026-09-09T15:00:00.000Z');
+});
+test('Experiencias múltiples, categorías por tareas y períodos superpuestos',()=>{
+ assert.deepEqual(categories('repartía mercadería, atendía clientes y cobraba'),['Atención al cliente','Reparto','Cobranza o manejo de dinero']);
+ assert.equal(categories('Empresa Coca Cola').length,0);
+ const id=repo.list()[0].id,v=repo.versions(id)[0];
+ const manual={employer:'Otra empresa',role:'Operario',tasks:'Carga y descarga',start:'2020-01-01',end:'2021-01-01',categories:['Carga y descarga','Depósito y logística']};
+ experience.save(id,{data:manual,version_id:v.id,confirm:true},1);
+ const totals=experience.totals([{data:manual},{data:{...manual,start:'2020-06-01',end:'2021-06-01'}}],'2026-09-10');
+ assert.equal(totals['Carga y descarga'].days,(Date.parse('2021-06-01')-Date.parse('2020-01-01'))/86400000);
+ assert.equal(new ExperienciaLaboral({...manual,start:'2020',end:'2021'}).duration('2026-09-10'),null);
+ assert.equal(dateRange('2026-09-09','2026-09-10').end,'2026-09-11T03:00:00.000Z');
+ assert.equal(csvCell('=HYPERLINK("evil")').startsWith('"\''),true);assert.equal(csvCell('  +SUM(1)').startsWith('"\''),true);
+});
+test('Archivo guardado aunque falle lectura y ZIP incompleto bloqueado',async()=>{
+ const r=receive('bad',{chat:'333@c.us',file:'invalid-pdf'});const previous=process.env.PYTHON_BIN;process.env.PYTHON_BIN='nonexistent-python-rrhh';
+ extraction.enqueue(r.hash);while(extraction.running||extraction.queue.length)await new Promise(r=>setTimeout(r,10));if(previous)process.env.PYTHON_BIN=previous;else delete process.env.PYTHON_BIN;
+ assert.equal(repo.file(r.hash).read_state,'error');assert.ok(fs.existsSync(path.join(repo.root,'cv',repo.file(r.hash).path)));
+ assert.throws(()=>exportsService.start({start:'2026-09-09',end:'2026-09-10'},1),/pendientes/);
+});
+after(async()=>{await services.close();db.close();fs.rmSync(process.env.DATA_DIR,{recursive:true,force:true});});
+</file>
+
+<file path="test/sync.test.js">
+const {test,after}=require('node:test');const assert=require('assert/strict');const fs=require('fs');const os=require('os');const path=require('path');const {EventEmitter}=require('events');
+process.env.DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-sync-'));
+const {db,services}=require('../server');const {WhatsAppService,SincronizacionService}=require('../lib/whatsapp');
+services.cv.extraction=null;
+class FakeClient extends EventEmitter{initialize(){return Promise.resolve();}destroy(){return Promise.resolve();}}
+test('QR y conflicto, sincronización reanudable, LID, grupos y medio no disponible',async()=>{
+ const client=new FakeClient();const wa=new WhatsAppService(services.repo,services.cv,{clientFactory:()=>client});
+ await assert.rejects(wa.connect({otherIntegration:true}),/Conflicto/);await wa.connect({exclusiveAccount:true});client.emit('qr','QR-SINTETICO-DE-PRUEBA');await new Promise(r=>setTimeout(r,80));assert.ok(wa.status(true).qr?.startsWith('data:image/png'));assert.equal(wa.status(false).qr,null);await wa.disconnect();
+ wa.client=client;wa.account='test';wa.state='ready';
+ const sync=new SincronizacionService(services.repo,wa);wa.sync=sync;
+ let fail=true;client.getChats=async()=>[{isGroup:true,id:{_serialized:'g@g.us'}},{id:{_serialized:'1@lid'}},{id:{_serialized:'status@broadcast'}}];
+ const message={from:'1@lid',id:{_serialized:'m1'},timestamp:Date.parse('2026-09-09T12:00:00Z')/1000,hasMedia:true,body:'mi cv',downloadMedia:async()=>({mimetype:'application/pdf',filename:'cv.pdf',data:Buffer.from('%PDF-1.7 fake').toString('base64')})};
+ client.getChatById=async()=>{if(fail)throw Error('Fallo reintentable');return {fetchMessages:async()=>[message]};};
+ const started=sync.start({start:'2026-09-09',end:'2026-09-10'});while(sync.active)await new Promise(r=>setTimeout(r,10));assert.equal(sync.list()[0].state,'paused');assert.equal(sync.list()[0].cursor,0);
+ fail=false;const restarted=new SincronizacionService(services.repo,wa);restarted.resume(started.id);while(restarted.active)await new Promise(r=>setTimeout(r,10));assert.equal(restarted.list()[0].state,'done');assert.equal(restarted.list()[0].cursor,1);
+ let receipt=db.prepare('SELECT * FROM cv_receipts WHERE message_id=?').get('m1');assert.equal(receipt.phone,'');assert.equal(receipt.chat,'1@lid');
+ await wa.enqueue(message);assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,1);
+ await wa.enqueue({...message,id:{_serialized:'missing'},downloadMedia:async()=>null});assert.equal(db.prepare('SELECT state FROM cv_receipts WHERE message_id=?').get('missing').state,'error');
+ await wa.enqueue({...message,from:'g@g.us',id:{_serialized:'group'}});assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,2);
+ await wa.disconnect();
+});
+after(async()=>{await services.close();db.close();fs.rmSync(process.env.DATA_DIR,{recursive:true,force:true});});
+</file>
+
+<file path=".repomixignore">
+data/
+backups/
+node_modules/
+.git/
+.env*
+*.sqlite*
+*.db
+*.pem
+*.key
+*.log
+repomix-output.*
+package-lock.json
+</file>
+
+<file path="docs/transferencias-referencia.md">
+# Referencia recibida: Transferencias
+
+Se recibió y revisó `transferencias-main.zip`. El original se conserva localmente en `data/referencias/`, fuera de Git y Repomix.
+
+Componentes identificados en el código de referencia:
+
+- `whatsapp-web.js` con `Client` y `LocalAuth` en `app/index.js`.
+- Sesión persistente en `sesion_whatsapp`, navegador configurable y ejecución sin ventana.
+- Evento `qr` para vincular y evento `message` para recibir mensajes.
+- Descarga de adjuntos con reintentos y recuperación por identificador de mensaje.
+- Lectura de documentos mediante scripts Python específicos de comprobantes.
+
+La adaptación a RRHH debe crear una sesión independiente y vincular cada CV con el chat de origen. El reconocimiento de importes, bancos y comprobantes de Transferencias no corresponde a la evaluación de currículums.
+
+Esta revisión no activa la conexión de WhatsApp de RRHH ni modifica la sesión de Transferencias. La integración sigue pendiente.
+</file>
+
+<file path="iniciar.cmd">
+@echo off
+cd /d "%~dp0"
+node server.js
+pause
+</file>
+
+<file path="ocr.py">
+import sys, subprocess, tempfile, os
+import pymupdf
+
+source, binary, language = sys.argv[1:4]
+with tempfile.TemporaryDirectory(prefix='rrhh-ocr-') as folder:
+    paths = [source]
+    if source.lower().endswith('.pdf'):
+        doc = pymupdf.open(source)
+        if len(doc) > 20:
+            raise ValueError('OCR limitado a 20 páginas por CV')
+        paths = []
+        for i, page in enumerate(doc):
+            target = os.path.join(folder, f'{i}.png')
+            page.get_pixmap(matrix=pymupdf.Matrix(2,2)).save(target)
+            paths.append(target)
+    for path in paths:
+        result = subprocess.run([binary,path,'stdout','-l',language],capture_output=True,check=True)
+        sys.stdout.buffer.write(result.stdout + b'\n')
+</file>
+
+<file path="public/index.html">
+<!doctype html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>IVESS · Personas</title><link rel="stylesheet" href="/style.css?v=3"></head><body>
+<div id="login" class="login"><div class="login-card"><div class="waterline"></div><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><div class="login-eyebrow">GESTIÓN DE PERSONAS</div><h1>Tu equipo<br>empieza acá.</h1><p>Gestión de postulantes · Red interna</p><form id="loginForm"><label id="setupLabel" hidden>Clave de instalación<input name="token" autocomplete="off"><small>Disponible en data/clave-inicial.txt del servidor.</small></label><label>Usuario<input name="username" required autocomplete="username"></label><label>Contraseña<input name="password" type="password" required autocomplete="current-password"></label><button class="primary" id="loginButton">Ingresar</button><p id="loginError" role="alert"></p></form><div class="login-partner"><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."><span>Un mismo equipo.<br>Más posibilidades.</span></div></div></div>
+<div id="app" hidden><aside><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><p class="nav-title">ESPACIO DE TRABAJO</p><nav><button data-view="whatsapp" class="active">WhatsApp y sincronización</button><button data-view="candidates">Postulantes y CV</button><button data-view="downloads">Descargas por fecha</button><button data-view="settings">Configuración</button></nav><div class="aside-bottom"><span class="dot"></span> Servidor local<p id="identity"></p><button id="logout">Cerrar sesión ↗</button></div></aside>
+<main><header><div>RECURSOS HUMANOS <span>/</span> <b id="breadcrumb">Postulantes</b></div><div class="header-brand"><span class="location">Virrey del Pino · Buenos Aires</span><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."></div></header><section id="content"></section><footer>IVESS · Gestión de personas <span>Recepción de CV y datos con fuentes verificables.</span></footer></main></div>
+<dialog id="modal"><div id="modalContent"></div></dialog><div id="toast" role="status" hidden></div><script src="/reception.js?v=3" defer></script></body></html>
+</file>
+
+<file path="public/style.css">
+:root{font-family:Inter,"Segoe UI",sans-serif;color:#182d2a;background:#f4f6f4;font-synthesis:none}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d7dfda;background:white;border-radius:7px;padding:10px 15px;color:inherit}button:hover{background:#edf4ef}button:disabled{opacity:.55;cursor:wait}.primary{background:#176448;border-color:#176448;color:#fff}.primary:hover{background:#104d37}input,select,textarea{border:1px solid #d7dfda;background:white;border-radius:6px;padding:10px;width:100%;color:#263e36}textarea{min-height:95px;resize:vertical}label{display:grid;gap:7px;font-size:13px;color:#52645c}small{color:#7b8980;font-size:12px}h1{font-size:30px;letter-spacing:-1px;font-weight:650;margin:0 0 10px}h2{font-size:20px;margin:0 0 14px}h3{font-size:16px}p{line-height:1.6;color:#738079}aside{position:fixed;inset:0 auto 0 0;width:236px;background:#fff;border-right:1px solid #e1e6e1;padding:35px 22px;display:flex;flex-direction:column}.brand{font-size:43px;font-weight:850;letter-spacing:-3px;color:#17734b;line-height:1}.brand span{display:block;font-size:10px;letter-spacing:4px;margin:13px 0 0 4px;color:#6c8072;font-weight:600}.nav-title{font-size:10px;letter-spacing:1.5px;margin:55px 10px 15px}nav{display:grid;gap:9px}nav button{border:0;text-align:left;background:transparent;font-size:14px;padding:13px}nav button.active{background:#eaf2eb;color:#176448;font-weight:650}.aside-bottom{margin-top:auto;font-size:12px;color:#6b7c72}.aside-bottom p{margin:8px 0}.aside-bottom button{border:0;padding-left:0;font-size:12px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#43a66b;margin-right:6px}main{margin-left:236px}header{height:82px;padding:0 40px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid #e1e6e1;font-size:11px;letter-spacing:1px}header span{color:#a3b0a8;margin:0 14px}header b{font-weight:500;letter-spacing:0}.location{letter-spacing:0;color:#738079}#content{padding:38px 40px;min-height:calc(100vh - 140px)}.heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:25px;gap:15px}.heading p{margin:0;font-size:14px}.actions{display:flex;gap:10px;align-items:center}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:28px}.stat,.panel{background:white;border:1px solid #dfe6df;border-radius:10px}.stat{padding:22px}.stat small{font-size:12px}.stat strong{font-size:32px;display:block;margin:9px 0 4px;font-weight:600}.stat span{font-size:11px;color:#758579}.stat:first-child{border-top:3px solid #257452;padding-top:20px}.panel{padding:23px;margin-bottom:22px}.filters{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px;margin:18px 0}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px;white-space:nowrap}th{font-weight:500;color:#7b877f;font-size:11px;background:#f8faf8;padding:13px 12px;border-bottom:1px solid #e5eae5}td{padding:17px 12px;border-bottom:1px solid #edf0ec}td input{width:auto}td button{padding:6px 10px;font-size:12px}.person{display:flex;gap:11px;align-items:center}.avatar{background:#eaf1e8;color:#4f7057;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:600}.person small{display:block;margin-top:5px}.badge{padding:5px 9px;background:#f0f2eb;color:#6e7757;border-radius:20px;font-size:11px}.badge.green{background:#e8f3eb;color:#267451}.empty{text-align:center;padding:55px 20px;color:#7a8c80}.empty strong{display:block;color:#385943;font-size:18px;margin-bottom:8px}.notice{padding:15px 19px;background:#ecf2e9;border:1px solid #dce6d5;border-radius:8px;color:#60714e;font-size:12px;line-height:1.6}.muted{color:#7b8981;font-size:12px}.toolbar{display:flex;align-items:center;gap:12px;margin:15px 0}.toolbar select{width:auto}footer{padding:18px 40px;font-size:11px;color:#89958a;display:flex;justify-content:space-between;border-top:1px solid #e0e6e0}dialog{width:820px;max-width:95vw;border:0;border-radius:13px;padding:30px;color:inherit;max-height:90vh;box-shadow:0 20px 100px #1232}dialog::backdrop{background:#172e2866;backdrop-filter:blur(2px)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}.wide{grid-column:1/-1}.modal-head{display:flex;justify-content:space-between;align-items:center}.modal-head button{border:0;font-size:20px}.form-actions{display:flex;justify-content:flex-end;gap:10px;border-top:1px solid #e5eae4;padding-top:18px}.login{min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at top left,#dcebdc,transparent 70%)}.login-card{width:440px;max-width:92vw;background:white;padding:42px;border:1px solid #dae4d8;border-radius:14px}.login-card h1{font-size:26px;margin-top:40px}.login-card form{display:grid;gap:18px;margin-top:30px}#loginError{color:#ae443d;font-size:13px;margin:0}#toast{position:fixed;bottom:25px;right:25px;max-width:450px;padding:17px 24px;background:#173f30;color:white;border-radius:8px;box-shadow:0 10px 40px #0002;z-index:10}pre{white-space:pre-wrap;max-height:250px;overflow:auto;font:12px/1.6 Consolas,monospace;background:#f5f7f4;padding:14px}a{color:#196c49}.campaign{display:flex;justify-content:space-between;gap:20px;align-items:center}.campaign p{font-size:13px}.campaign strong{font-size:22px}.campaign small{display:block}details{margin-top:16px}.error{color:#ac403b}input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid #85b399;outline-offset:2px}[hidden]{display:none!important}@media(max-width:1000px){aside{width:185px;padding:28px 15px}main{margin-left:185px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:15px}header{padding:0 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}}@media(max-width:650px){aside{position:static;width:auto;padding:18px}.brand{font-size:30px}.brand span{display:none}.nav-title,.aside-bottom{display:none}nav{display:flex;margin-top:15px}nav button{font-size:12px;padding:8px}main{margin:0}header{height:50px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.actions{flex-wrap:wrap}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:15px}.toolbar{flex-wrap:wrap}footer span{display:none}dialog{padding:20px}}
+/* Identidad visual IVESS / Atilio Etchelar, tomada del separador de referencia. */
+:root{--navy:#064275;--blue:#0a67aa;--aqua:#21b4dc;--pale:#edf8fd;--line:#cfe2ec;color:#162b3b;background:#eaf5fb}
+body{min-height:100vh;background:radial-gradient(circle at 95% 5%,#21b4dc25,transparent 32rem),linear-gradient(145deg,#f8fcff,#eaf6fc 65%,#e0f1fa)}
+button{border-color:var(--line);border-radius:11px;padding:11px 16px;color:var(--blue);font-weight:600;transition:background .16s,box-shadow .16s}
+button:hover{background:#eef8fd;border-color:#8bc4dc;box-shadow:0 4px 12px #0642750b}
+.primary{background:linear-gradient(105deg,var(--navy),var(--blue) 65%,#158fbe);border-color:transparent;color:white;box-shadow:0 7px 17px #06427524}
+.primary:hover{background:linear-gradient(105deg,#07518b,#087cbe 70%,#19a0cc);border-color:transparent}
+input,select,textarea{border-color:#c6dce8;border-radius:10px;padding:11px 12px;min-width:0;color:#162b3b}
+input::placeholder{color:#6e8594}input[type=checkbox]{accent-color:var(--blue);width:17px;height:17px;cursor:pointer}
+input[type=file]{background:var(--pale);border-style:dashed;font-size:12px}input::file-selector-button{border:0;border-radius:6px;background:#d9edf8;color:var(--navy);padding:7px 10px;margin-right:12px}
+label{color:var(--navy);font-weight:600}small,p,.muted{color:#586f7e}small{font-weight:400}
+h1{font-size:clamp(26px,2.4vw,36px);line-height:1.15;letter-spacing:-1.1px;font-weight:750;color:var(--navy)}h2,h3{color:var(--navy)}
+aside{width:244px;background:linear-gradient(180deg,#fff 35%,#f1f9fd);border-color:var(--line);padding:35px 20px 24px;z-index:2}
+.brand{line-height:1;text-align:center;padding:0 12px}.brand img{display:block;width:100%;max-width:185px;height:66px;object-fit:contain;margin:auto}.brand span{font-size:9px;letter-spacing:2.1px;margin-top:13px;color:var(--blue);font-weight:750}
+.nav-title{font-size:10px;font-weight:650;letter-spacing:1.3px;margin:47px 13px 15px;color:#647f90}
+nav button{color:#547286;border-radius:12px;padding:14px}nav button.active{background:linear-gradient(105deg,var(--navy),var(--blue));color:white;box-shadow:0 7px 16px #06427525}
+.aside-bottom{color:#547286;padding:18px 12px 0;border-top:1px solid var(--line)}.aside-bottom p{color:var(--navy);font-weight:650}.aside-bottom button{background:transparent}.dot{background:#269d7a;box-shadow:0 0 0 3px #269d7a17}
+main{margin-left:244px}header{height:92px;padding:15px 38px;gap:20px;background:#ffffffbd;border-color:#d1e6f0;font-size:10px;color:var(--blue)}header b{font-weight:600;font-size:12px;color:var(--navy)}
+.header-brand{display:flex;gap:23px;align-items:center}.header-brand img{width:128px;height:51px;object-fit:contain}.location{color:#586f7e;font-size:11px}
+#content{padding:34px 38px;min-height:calc(100vh - 146px);max-width:1700px;margin:auto}.heading{gap:22px}.heading p{font-size:13px}
+#content>.heading{position:relative;padding:30px 28px 28px;background:linear-gradient(115deg,#ffffffef,#f4fbffdd);border:1px solid #c5deeb;border-radius:20px;box-shadow:0 12px 36px #0642750d;overflow:hidden}
+#content>.heading::before{content:'';position:absolute;inset:0 0 auto;height:5px;background:linear-gradient(90deg,var(--navy),var(--blue) 55%,var(--aqua))}
+.actions{flex-shrink:0;font-size:13px}.stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:25px}
+.stat,.panel{background:#ffffffed;border:1px solid var(--line);border-radius:17px;box-shadow:0 12px 36px #0642750d}
+.stat{position:relative;padding:21px 23px;overflow:hidden}.stat::after{content:'';position:absolute;right:-17px;bottom:-24px;width:90px;height:90px;border:16px solid #21b4dc09;border-radius:50%;pointer-events:none}
+.stat small{font-size:11px;text-transform:uppercase;font-weight:700;letter-spacing:.65px;color:var(--blue)}.stat strong{font-size:35px;margin:10px 0 5px;font-weight:750;color:var(--navy);line-height:1.1}.stat span{color:#586f7e}
+.stat:first-child{padding-top:21px;background:linear-gradient(120deg,#064275,#0a67aa);border:1px solid #0a67aa}.stat:first-child small{color:#d4efff}.stat:first-child strong{color:white}.stat:first-child span{color:#d1e9f7}.stat:first-child::after{border-color:#ffffff0a}
+.panel{padding:25px;overflow:hidden}.panel>.heading{margin-bottom:18px}.panel>.heading h2{margin:0}.filters{gap:11px;font-size:12px}
+.table-wrap{border:1px solid #dceaf2;border-radius:12px}th{font-weight:700;color:#416985;font-size:10px;letter-spacing:.7px;background:#edf7fc;padding:14px 12px;border-color:#d7e8f2}td{border-color:#e6f0f6}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#f5fbfe}tbody tr:has(input:checked){background:#edf8fd}td button{border-radius:8px;font-size:11px}
+.person{font-weight:600;color:var(--navy)}.avatar{background:linear-gradient(140deg,#e1f2fb,#d0eaf8);color:var(--blue);width:38px;height:38px;border-radius:12px;border:1px solid #c1e2f2}
+.badge{background:#fff4dc;color:#805a16;font-weight:600;display:inline-block}.badge.green{background:#e5f5ee;color:#237150}
+.empty{color:#586f7e;font-size:13px;background:radial-gradient(ellipse at center,#edf8fd99,transparent 70%)}.empty::before{content:'';display:block;width:32px;height:32px;border-radius:50% 50% 50% 7px;transform:rotate(45deg);background:linear-gradient(145deg,var(--blue),var(--aqua));margin:0 auto 23px;box-shadow:0 7px 20px #0a67aa22}.empty strong{color:var(--navy)}
+.notice{background:#edf8fdd9;border:1px solid #c3dfed;border-left:4px solid var(--aqua);border-radius:12px;color:#3f667c;line-height:1.7}.toolbar{font-size:12px}.toolbar #selectionCount{margin-right:auto}
+footer{font-size:10px;color:#5c7a8e;border-color:#d1e5f0;gap:20px}
+dialog{border:1px solid #c2ddea;border-top:5px solid var(--blue);border-radius:20px;box-shadow:0 25px 100px #06427538;background:linear-gradient(155deg,#fff,#f5fbfe)}dialog::backdrop{background:#082e4a66;backdrop-filter:blur(5px)}.modal-head h2{margin:0}.modal-head button{background:#eaf5fc;padding:4px 12px}.form-actions{border-color:var(--line);margin-top:15px}
+.login{padding:35px 20px;background:radial-gradient(circle at 13% 20%,#21b4dc21,transparent 28rem),radial-gradient(circle at 90% 80%,#0a67aa18,transparent 30rem)}
+.login-card{position:relative;overflow:hidden;width:470px;max-width:100%;background:#ffffffef;padding:40px 44px 28px;border:1px solid #bfdae9;border-radius:24px;box-shadow:0 20px 65px #06427520}.waterline{position:absolute;inset:0 0 auto;height:7px;background:linear-gradient(90deg,var(--navy),var(--blue) 52%,var(--aqua))}
+.login-card .brand{padding:0;display:flex;align-items:center;gap:20px;text-align:left}.login-card .brand img{width:152px;height:62px;margin:0}.login-card .brand span{font-size:9px;line-height:1.8;letter-spacing:1.8px;border-left:1px solid var(--line);padding-left:20px;margin:0;max-width:140px}
+.login-eyebrow{font-size:10px;color:var(--blue);letter-spacing:1.8px;font-weight:750;margin-top:35px}.login-card h1{font-size:38px;line-height:1.12;margin:24px 0 12px}.login-card>p{font-size:13px}.login-card form .primary{min-height:47px}.login-partner{display:flex;align-items:center;justify-content:space-between;gap:20px;border-top:1px solid var(--line);padding-top:22px;margin-top:24px}.login-partner img{width:125px;height:50px;object-fit:contain}.login-partner span{font-size:11px;color:#586f7e;line-height:1.6}
+#toast{background:var(--navy);border:1px solid #2773a2;border-radius:13px;box-shadow:0 10px 40px #06427530;max-width:min(450px,calc(100vw - 32px));font-size:13px}pre{background:#edf6fb;border-radius:10px}a{color:var(--blue)}.campaign strong{font-size:28px;color:var(--navy)}summary{cursor:pointer;color:var(--navy)}hr{border:0;border-top:1px solid var(--line);margin:24px 0}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--aqua);outline-offset:2px;box-shadow:0 0 0 4px #21b4dc15}
+@media(min-width:1200px) and (max-width:1450px){#content>.heading{align-items:flex-start;flex-direction:column}.actions{align-self:flex-end}}
+@media(max-width:1199px){aside{width:210px;padding:28px 16px}.brand img{height:57px}main{margin-left:210px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:18px}.stat small{font-size:10px}header{padding:15px 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}.panel>.heading{gap:8px}.actions{flex-wrap:wrap}#content>.heading{padding:26px}}
+@media(max-width:760px){aside{position:static;width:auto;padding:15px 18px;background:#ffffffeb}.brand{display:flex;align-items:center;gap:15px;padding:0}.brand img{width:105px;height:40px;margin:0}.brand span{display:block;margin:0;font-size:8px;letter-spacing:1.6px}.nav-title{display:none}.aside-bottom{display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px 0 0;font-size:10px}.aside-bottom p{margin:0}.aside-bottom button{margin-left:auto;padding:0;font-size:10px}nav{display:flex;margin-top:16px;gap:6px}nav button{font-size:11px;padding:10px;flex:1;text-align:center;border-radius:9px}main{margin:0}header{height:60px;padding:10px 18px;font-size:9px}.header-brand img{width:91px;height:36px}header b{font-size:10px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.stat{padding:18px}.stat strong{font-size:30px}.stat span{font-size:10px}#content>.heading{padding:24px 19px;gap:20px;border-radius:17px}h1{font-size:28px}.heading p{font-size:12px;line-height:1.7}.actions{width:100%;gap:8px}.actions button{flex:1;padding:11px 9px;font-size:11px}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:17px;border-radius:15px}.filters{gap:9px}.filters input,.filters select{padding:11px 9px;font-size:11px}.toolbar{flex-wrap:wrap;gap:8px}.toolbar button{padding:9px 10px;font-size:11px}.toolbar #selectionCount{width:100%;margin-bottom:4px}.campaign{flex-wrap:wrap}.campaign>div:first-child{width:100%}footer{padding:18px}footer span{display:none}dialog{padding:22px 18px;border-radius:17px}.notice{padding:13px 15px;font-size:11px}.login-card{padding:32px 27px 25px}.login-card h1{font-size:34px}.login-card .brand img{width:135px}.login-card .brand span{padding-left:15px}.login-partner span{font-size:10px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+.block{display:block;margin-top:5px}.qr{width:260px;height:260px;max-width:100%;object-fit:contain}.checkline{display:flex;align-items:center;gap:10px;line-height:1.6;margin:16px 0}.checkline input{width:auto;flex-shrink:0}fieldset{border:1px solid var(--line);border-radius:12px;padding:15px}.employment{border:1px solid var(--line);border-radius:12px;padding:18px;margin:18px 0}.employment p{white-space:pre-wrap}.download-link{display:inline-block;padding:12px 20px;background:var(--blue);color:white;border-radius:10px}#peopleRows{margin-top:20px}@media(max-width:760px){nav{flex-wrap:wrap}nav button{flex:1 1 40%}.employment{padding:12px}.qr{width:220px;height:220px}}
+</file>
+
+<file path="scripts/browser-check.js">
+const {chromium}=require('@playwright/test');
+const fs=require('fs');const os=require('os');const path=require('path');const assert=require('assert/strict');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-ui-'));process.env.DATA_DIR=dir;
+const {app,db}=require('../server');
+(async()=>{const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const browser=await chromium.launch({channel:'msedge',headless:true});try{const page=await browser.newPage({viewport:{width:1440,height:960}});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}`);await page.getByLabel('Clave de instalación').fill(fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8'));await page.getByLabel('Usuario',{exact:true}).fill('admin');await page.getByLabel('Contraseña',{exact:true}).fill('prueba-ui-segura-123');await page.getByRole('button',{name:'Crear administrador'}).click();await page.getByRole('button',{name:'Nuevo postulante'}).click();await page.getByLabel('Nombre y apellido').fill('Postulante de prueba');await page.getByLabel('WhatsApp del chat').fill('1155550000');await page.getByLabel('Teléfono indicado en el CV').fill('1166660000');assert.equal(await page.locator('#phoneWarning').isVisible(),true);await page.getByRole('button',{name:'Guardar ficha'}).click();await page.getByRole('button',{name:'Ver ficha'}).waitFor();await page.getByRole('button',{name:'Convocatorias',exact:false}).first().click();await page.getByRole('button',{name:'Nueva convocatoria'}).click();await page.getByLabel('Título',{exact:true}).fill('Entrevistas de prueba');await page.getByLabel('Fecha',{exact:true}).fill('2026-09-16');await page.getByLabel('Horario de inicio').fill('09:00');await page.getByRole('button',{name:'Crear convocatoria'}).click();await page.getByRole('button',{name:'Ver convocatoria'}).waitFor();await page.getByRole('button',{name:'Postulantes',exact:false}).first().click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'Agregar a convocatoria'}).click();await page.getByRole('button',{name:'Agregar selección'}).click();await page.locator('dialog').waitFor({state:'hidden'});await page.screenshot({path:path.join(__dirname,'..','data','panel-verificado.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);assert.deepEqual(errors,[]);console.log('Prueba visual OK: instalación, login, ficha, aviso de teléfonos, convocatoria y selección; escritorio y móvil.');}finally{await browser.close();await new Promise(r=>server.close(r));db.close();fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
+</file>
 
 <file path="scripts/excel-import.js">
 const ExcelJS = require('exceljs');
@@ -184,65 +1131,109 @@ test('Evaluación con fila 8, fórmulas, fechas UTC y categorías agrupadas sin 
 });
 </file>
 
-<file path=".repomixignore">
+<file path="test/integration.test.js">
+const {test,after}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('fs');
+const os=require('os');
+const path=require('path');
+const ExcelJS=require('exceljs');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-test-'));
+process.env.DATA_DIR=dir;
+const {app,db}=require('../server');
+const server=app.listen(0,'127.0.0.1');
+let cookie='';
+async function request(route,method='GET',body,auth=true){const response=await fetch(`http://127.0.0.1:${server.address().port}/api${route}`,{method,headers:{...(body instanceof FormData?{}:{'Content-Type':'application/json'}),...(auth?{Cookie:cookie}:{})},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.json(),headers:response.headers};}
+test('Acceso, fichas concurrentes, importación, convocatorias y permisos',async()=>{
+ assert.equal((await request('/candidates')).status,401);
+ for(const route of ['/whatsapp','/sync','/files/unknown','/exports/unknown/download'])assert.equal((await request(route)).status,401);
+ assert.equal((await request('/setup','POST',{username:'admin',password:'correcta-prueba-123',token:'incorrecto'})).status,403);
+ assert.equal((await request('/setup','POST',{username:'admin',password:'correcta-prueba-123',token:fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8')})).status,200);
+ const login=await request('/login','POST',{username:'admin',password:'correcta-prueba-123'});cookie=login.headers.get('set-cookie').split(';')[0];
+ const created=await request('/candidates','POST',{name:'Persona de prueba',phone:'1112345678',license:'C1',distance:10});assert.equal(created.status,200);
+ const id=created.body.id;let row=(await request('/candidates')).body[0];assert.equal(row.name,'Persona de prueba');
+ assert.equal((await request('/candidates/'+id,'PUT',{...row,status:'Revisado'})).status,200);
+ assert.equal((await request('/candidates/'+id,'PUT',{...row,status:'Archivado'})).status,409);
+ const campaign=await request('/campaigns','POST',{title:'Entrevistas de prueba',date:'2026-09-16',time:'09:00',capacity:1});const cid=campaign.body.id;
+ assert.equal((await request(`/campaigns/${cid}/invitations`,'POST',{ids:[id]})).status,200);
+ const second=(await request('/candidates','POST',{name:'Otra persona'})).body.id;
+ assert.equal((await request(`/campaigns/${cid}/invitations`,'POST',{ids:[second]})).status,400);
+ assert.equal((await request(`/campaigns/${cid}/invitations/${id}`,'PUT',{status:'Confirmó'})).status,200);
+ assert.equal((await request('/campaigns')).body[0].invitations[0].status,'Confirmó');
+ const book=new ExcelJS.Workbook();book.addWorksheet('Postulantes').addRows([['Nombre y apellido','WhatsApp','Localidad','Licencia'],['Importado','1122223333','Virrey del Pino','B1']]);const form=new FormData();form.append('file',new Blob([await book.xlsx.writeBuffer()]),'prueba.xlsx');
+ const preview=await request('/import/preview','POST',form);assert.equal(preview.body.rows[0].name,'Importado');
+ assert.equal((await request('/import/commit','POST',{rows:preview.body.rows})).body.added,1);
+ assert.equal((await request('/import/commit','POST',{rows:preview.body.rows})).body.skipped,1);
+ const rollback=await request('/import/commit','POST',{rows:[{name:'No debe guardarse'},{name:''}]});assert.equal(rollback.status,400);assert.equal((await request('/candidates')).body.length,3);
+ const invalid=new FormData();invalid.append('file',new Blob(['executable']),'programa.exe');assert.equal((await request(`/candidates/${id}/documents`,'POST',invalid)).status,400);
+ assert.equal((await request('/users','POST',{username:'operador',password:'otra-clave-prueba-123'})).status,200);
+ const login2=await request('/login','POST',{username:'operador',password:'otra-clave-prueba-123'});cookie=login2.headers.get('set-cookie').split(';')[0];
+ assert.equal((await request('/users','POST',{username:'tercero',password:'otra-clave-prueba-123'})).status,403);
+ assert.equal((await request('/backup','POST')).status,403);
+ assert.equal((await request('/whatsapp/connect','POST',{exclusiveAccount:true})).status,403);
+ assert.equal((await request('/sync','POST',{start:'2026-09-09',end:'2026-09-10'})).status,403);
+ assert.equal((await request('/whatsapp')).body.qr,null);
+ await request('/logout','POST');assert.equal((await request('/candidates')).status,401);
+});
+after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(dir,{recursive:true,force:true});});
+</file>
+
+<file path=".gitignore">
+node_modules/
 data/
 backups/
-node_modules/
-.git/
-.env*
+*.log
+.env
+.env.*
+!.env.example
 *.sqlite*
 *.db
 *.pem
 *.key
-*.log
-repomix-output.*
-package-lock.json
+__pycache__/
 </file>
 
-<file path="docs/transferencias-referencia.md">
-# Referencia recibida: Transferencias
-
-Se recibió y revisó `transferencias-main.zip`. El original se conserva localmente en `data/referencias/`, fuera de Git y Repomix.
-
-Componentes identificados en el código de referencia:
-
-- `whatsapp-web.js` con `Client` y `LocalAuth` en `app/index.js`.
-- Sesión persistente en `sesion_whatsapp`, navegador configurable y ejecución sin ventana.
-- Evento `qr` para vincular y evento `message` para recibir mensajes.
-- Descarga de adjuntos con reintentos y recuperación por identificador de mensaje.
-- Lectura de documentos mediante scripts Python específicos de comprobantes.
-
-La adaptación a RRHH debe crear una sesión independiente y vincular cada CV con el chat de origen. El reconocimiento de importes, bancos y comprobantes de Transferencias no corresponde a la evaluación de currículums.
-
-Esta revisión no activa la conexión de WhatsApp de RRHH ni modifica la sesión de Transferencias. La integración sigue pendiente.
-</file>
-
-<file path="iniciar.cmd">
-@echo off
-cd /d "%~dp0"
-node server.js
-pause
-</file>
-
-<file path="ocr.py">
-import sys, subprocess, tempfile, os
-import pymupdf
-
-source, binary, language = sys.argv[1:4]
-with tempfile.TemporaryDirectory(prefix='rrhh-ocr-') as folder:
-    paths = [source]
-    if source.lower().endswith('.pdf'):
-        doc = pymupdf.open(source)
-        if len(doc) > 20:
-            raise ValueError('OCR limitado a 20 páginas por CV')
-        paths = []
-        for i, page in enumerate(doc):
-            target = os.path.join(folder, f'{i}.png')
-            page.get_pixmap(matrix=pymupdf.Matrix(2,2)).save(target)
-            paths.append(target)
-    for path in paths:
-        result = subprocess.run([binary,path,'stdout','-l',language],capture_output=True,check=True)
-        sys.stdout.buffer.write(result.stdout + b'\n')
+<file path="package.json">
+{
+  "name": "rrhh-ivess",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node server.js",
+    "repomix": "repomix",
+    "repomix:stdout": "repomix --stdout"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "better-sqlite3": "^11.10.0",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
+    "multer": "^2.3.0",
+    "pdf-parse": "^1.1.1",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.34.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "repomix": "1.14.1"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marcosmartinezaesa/rrhh.git"
+  }
+}
 </file>
 
 <file path="public/app.js">
@@ -276,70 +1267,55 @@ function renderSettings(){$('#content').innerHTML=`<div class="heading"><div><h1
 boot().catch(()=>showLogin());
 </file>
 
-<file path="public/index.html">
-<!doctype html>
-<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>IVESS · Personas</title><link rel="stylesheet" href="/style.css?v=2"></head><body>
-<div id="login" class="login"><div class="login-card"><div class="waterline"></div><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><div class="login-eyebrow">GESTIÓN DE PERSONAS</div><h1>Tu equipo<br>empieza acá.</h1><p>Gestión de postulantes · Red interna</p><form id="loginForm"><label id="setupLabel" hidden>Clave de instalación<input name="token" autocomplete="off"><small>Disponible en data/clave-inicial.txt del servidor.</small></label><label>Usuario<input name="username" required autocomplete="username"></label><label>Contraseña<input name="password" type="password" required autocomplete="current-password"></label><button class="primary" id="loginButton">Ingresar</button><p id="loginError" role="alert"></p></form><div class="login-partner"><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."><span>Un mismo equipo.<br>Más posibilidades.</span></div></div></div>
-<div id="app" hidden><aside><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><p class="nav-title">ESPACIO DE TRABAJO</p><nav><button data-view="candidates" class="active">◉ &nbsp; Postulantes</button><button data-view="campaigns">▦ &nbsp; Convocatorias</button><button data-view="settings">⚙ &nbsp; Configuración</button></nav><div class="aside-bottom"><span class="dot"></span> Servidor local<p id="identity"></p><button id="logout">Cerrar sesión ↗</button></div></aside>
-<main><header><div>RECURSOS HUMANOS <span>/</span> <b id="breadcrumb">Postulantes</b></div><div class="header-brand"><span class="location">Virrey del Pino · Buenos Aires</span><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."></div></header><section id="content"></section><footer>IVESS · Gestión de personas <span>La selección y las confirmaciones requieren revisión humana.</span></footer></main></div>
-<dialog id="modal"><div id="modalContent"></div></dialog><div id="toast" role="status" hidden></div><script src="/app.js" defer></script></body></html>
-</file>
-
-<file path="public/style.css">
-:root{font-family:Inter,"Segoe UI",sans-serif;color:#182d2a;background:#f4f6f4;font-synthesis:none}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d7dfda;background:white;border-radius:7px;padding:10px 15px;color:inherit}button:hover{background:#edf4ef}button:disabled{opacity:.55;cursor:wait}.primary{background:#176448;border-color:#176448;color:#fff}.primary:hover{background:#104d37}input,select,textarea{border:1px solid #d7dfda;background:white;border-radius:6px;padding:10px;width:100%;color:#263e36}textarea{min-height:95px;resize:vertical}label{display:grid;gap:7px;font-size:13px;color:#52645c}small{color:#7b8980;font-size:12px}h1{font-size:30px;letter-spacing:-1px;font-weight:650;margin:0 0 10px}h2{font-size:20px;margin:0 0 14px}h3{font-size:16px}p{line-height:1.6;color:#738079}aside{position:fixed;inset:0 auto 0 0;width:236px;background:#fff;border-right:1px solid #e1e6e1;padding:35px 22px;display:flex;flex-direction:column}.brand{font-size:43px;font-weight:850;letter-spacing:-3px;color:#17734b;line-height:1}.brand span{display:block;font-size:10px;letter-spacing:4px;margin:13px 0 0 4px;color:#6c8072;font-weight:600}.nav-title{font-size:10px;letter-spacing:1.5px;margin:55px 10px 15px}nav{display:grid;gap:9px}nav button{border:0;text-align:left;background:transparent;font-size:14px;padding:13px}nav button.active{background:#eaf2eb;color:#176448;font-weight:650}.aside-bottom{margin-top:auto;font-size:12px;color:#6b7c72}.aside-bottom p{margin:8px 0}.aside-bottom button{border:0;padding-left:0;font-size:12px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#43a66b;margin-right:6px}main{margin-left:236px}header{height:82px;padding:0 40px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid #e1e6e1;font-size:11px;letter-spacing:1px}header span{color:#a3b0a8;margin:0 14px}header b{font-weight:500;letter-spacing:0}.location{letter-spacing:0;color:#738079}#content{padding:38px 40px;min-height:calc(100vh - 140px)}.heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:25px;gap:15px}.heading p{margin:0;font-size:14px}.actions{display:flex;gap:10px;align-items:center}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:28px}.stat,.panel{background:white;border:1px solid #dfe6df;border-radius:10px}.stat{padding:22px}.stat small{font-size:12px}.stat strong{font-size:32px;display:block;margin:9px 0 4px;font-weight:600}.stat span{font-size:11px;color:#758579}.stat:first-child{border-top:3px solid #257452;padding-top:20px}.panel{padding:23px;margin-bottom:22px}.filters{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px;margin:18px 0}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px;white-space:nowrap}th{font-weight:500;color:#7b877f;font-size:11px;background:#f8faf8;padding:13px 12px;border-bottom:1px solid #e5eae5}td{padding:17px 12px;border-bottom:1px solid #edf0ec}td input{width:auto}td button{padding:6px 10px;font-size:12px}.person{display:flex;gap:11px;align-items:center}.avatar{background:#eaf1e8;color:#4f7057;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:600}.person small{display:block;margin-top:5px}.badge{padding:5px 9px;background:#f0f2eb;color:#6e7757;border-radius:20px;font-size:11px}.badge.green{background:#e8f3eb;color:#267451}.empty{text-align:center;padding:55px 20px;color:#7a8c80}.empty strong{display:block;color:#385943;font-size:18px;margin-bottom:8px}.notice{padding:15px 19px;background:#ecf2e9;border:1px solid #dce6d5;border-radius:8px;color:#60714e;font-size:12px;line-height:1.6}.muted{color:#7b8981;font-size:12px}.toolbar{display:flex;align-items:center;gap:12px;margin:15px 0}.toolbar select{width:auto}footer{padding:18px 40px;font-size:11px;color:#89958a;display:flex;justify-content:space-between;border-top:1px solid #e0e6e0}dialog{width:820px;max-width:95vw;border:0;border-radius:13px;padding:30px;color:inherit;max-height:90vh;box-shadow:0 20px 100px #1232}dialog::backdrop{background:#172e2866;backdrop-filter:blur(2px)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}.wide{grid-column:1/-1}.modal-head{display:flex;justify-content:space-between;align-items:center}.modal-head button{border:0;font-size:20px}.form-actions{display:flex;justify-content:flex-end;gap:10px;border-top:1px solid #e5eae4;padding-top:18px}.login{min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at top left,#dcebdc,transparent 70%)}.login-card{width:440px;max-width:92vw;background:white;padding:42px;border:1px solid #dae4d8;border-radius:14px}.login-card h1{font-size:26px;margin-top:40px}.login-card form{display:grid;gap:18px;margin-top:30px}#loginError{color:#ae443d;font-size:13px;margin:0}#toast{position:fixed;bottom:25px;right:25px;max-width:450px;padding:17px 24px;background:#173f30;color:white;border-radius:8px;box-shadow:0 10px 40px #0002;z-index:10}pre{white-space:pre-wrap;max-height:250px;overflow:auto;font:12px/1.6 Consolas,monospace;background:#f5f7f4;padding:14px}a{color:#196c49}.campaign{display:flex;justify-content:space-between;gap:20px;align-items:center}.campaign p{font-size:13px}.campaign strong{font-size:22px}.campaign small{display:block}details{margin-top:16px}.error{color:#ac403b}input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid #85b399;outline-offset:2px}[hidden]{display:none!important}@media(max-width:1000px){aside{width:185px;padding:28px 15px}main{margin-left:185px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:15px}header{padding:0 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}}@media(max-width:650px){aside{position:static;width:auto;padding:18px}.brand{font-size:30px}.brand span{display:none}.nav-title,.aside-bottom{display:none}nav{display:flex;margin-top:15px}nav button{font-size:12px;padding:8px}main{margin:0}header{height:50px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.actions{flex-wrap:wrap}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:15px}.toolbar{flex-wrap:wrap}footer span{display:none}dialog{padding:20px}}
-/* Identidad visual IVESS / Atilio Etchelar, tomada del separador de referencia. */
-:root{--navy:#064275;--blue:#0a67aa;--aqua:#21b4dc;--pale:#edf8fd;--line:#cfe2ec;color:#162b3b;background:#eaf5fb}
-body{min-height:100vh;background:radial-gradient(circle at 95% 5%,#21b4dc25,transparent 32rem),linear-gradient(145deg,#f8fcff,#eaf6fc 65%,#e0f1fa)}
-button{border-color:var(--line);border-radius:11px;padding:11px 16px;color:var(--blue);font-weight:600;transition:background .16s,box-shadow .16s}
-button:hover{background:#eef8fd;border-color:#8bc4dc;box-shadow:0 4px 12px #0642750b}
-.primary{background:linear-gradient(105deg,var(--navy),var(--blue) 65%,#158fbe);border-color:transparent;color:white;box-shadow:0 7px 17px #06427524}
-.primary:hover{background:linear-gradient(105deg,#07518b,#087cbe 70%,#19a0cc);border-color:transparent}
-input,select,textarea{border-color:#c6dce8;border-radius:10px;padding:11px 12px;min-width:0;color:#162b3b}
-input::placeholder{color:#6e8594}input[type=checkbox]{accent-color:var(--blue);width:17px;height:17px;cursor:pointer}
-input[type=file]{background:var(--pale);border-style:dashed;font-size:12px}input::file-selector-button{border:0;border-radius:6px;background:#d9edf8;color:var(--navy);padding:7px 10px;margin-right:12px}
-label{color:var(--navy);font-weight:600}small,p,.muted{color:#586f7e}small{font-weight:400}
-h1{font-size:clamp(26px,2.4vw,36px);line-height:1.15;letter-spacing:-1.1px;font-weight:750;color:var(--navy)}h2,h3{color:var(--navy)}
-aside{width:244px;background:linear-gradient(180deg,#fff 35%,#f1f9fd);border-color:var(--line);padding:35px 20px 24px;z-index:2}
-.brand{line-height:1;text-align:center;padding:0 12px}.brand img{display:block;width:100%;max-width:185px;height:66px;object-fit:contain;margin:auto}.brand span{font-size:9px;letter-spacing:2.1px;margin-top:13px;color:var(--blue);font-weight:750}
-.nav-title{font-size:10px;font-weight:650;letter-spacing:1.3px;margin:47px 13px 15px;color:#647f90}
-nav button{color:#547286;border-radius:12px;padding:14px}nav button.active{background:linear-gradient(105deg,var(--navy),var(--blue));color:white;box-shadow:0 7px 16px #06427525}
-.aside-bottom{color:#547286;padding:18px 12px 0;border-top:1px solid var(--line)}.aside-bottom p{color:var(--navy);font-weight:650}.aside-bottom button{background:transparent}.dot{background:#269d7a;box-shadow:0 0 0 3px #269d7a17}
-main{margin-left:244px}header{height:92px;padding:15px 38px;gap:20px;background:#ffffffbd;border-color:#d1e6f0;font-size:10px;color:var(--blue)}header b{font-weight:600;font-size:12px;color:var(--navy)}
-.header-brand{display:flex;gap:23px;align-items:center}.header-brand img{width:128px;height:51px;object-fit:contain}.location{color:#586f7e;font-size:11px}
-#content{padding:34px 38px;min-height:calc(100vh - 146px);max-width:1700px;margin:auto}.heading{gap:22px}.heading p{font-size:13px}
-#content>.heading{position:relative;padding:30px 28px 28px;background:linear-gradient(115deg,#ffffffef,#f4fbffdd);border:1px solid #c5deeb;border-radius:20px;box-shadow:0 12px 36px #0642750d;overflow:hidden}
-#content>.heading::before{content:'';position:absolute;inset:0 0 auto;height:5px;background:linear-gradient(90deg,var(--navy),var(--blue) 55%,var(--aqua))}
-.actions{flex-shrink:0;font-size:13px}.stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:25px}
-.stat,.panel{background:#ffffffed;border:1px solid var(--line);border-radius:17px;box-shadow:0 12px 36px #0642750d}
-.stat{position:relative;padding:21px 23px;overflow:hidden}.stat::after{content:'';position:absolute;right:-17px;bottom:-24px;width:90px;height:90px;border:16px solid #21b4dc09;border-radius:50%;pointer-events:none}
-.stat small{font-size:11px;text-transform:uppercase;font-weight:700;letter-spacing:.65px;color:var(--blue)}.stat strong{font-size:35px;margin:10px 0 5px;font-weight:750;color:var(--navy);line-height:1.1}.stat span{color:#586f7e}
-.stat:first-child{padding-top:21px;background:linear-gradient(120deg,#064275,#0a67aa);border:1px solid #0a67aa}.stat:first-child small{color:#d4efff}.stat:first-child strong{color:white}.stat:first-child span{color:#d1e9f7}.stat:first-child::after{border-color:#ffffff0a}
-.panel{padding:25px;overflow:hidden}.panel>.heading{margin-bottom:18px}.panel>.heading h2{margin:0}.filters{gap:11px;font-size:12px}
-.table-wrap{border:1px solid #dceaf2;border-radius:12px}th{font-weight:700;color:#416985;font-size:10px;letter-spacing:.7px;background:#edf7fc;padding:14px 12px;border-color:#d7e8f2}td{border-color:#e6f0f6}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#f5fbfe}tbody tr:has(input:checked){background:#edf8fd}td button{border-radius:8px;font-size:11px}
-.person{font-weight:600;color:var(--navy)}.avatar{background:linear-gradient(140deg,#e1f2fb,#d0eaf8);color:var(--blue);width:38px;height:38px;border-radius:12px;border:1px solid #c1e2f2}
-.badge{background:#fff4dc;color:#805a16;font-weight:600;display:inline-block}.badge.green{background:#e5f5ee;color:#237150}
-.empty{color:#586f7e;font-size:13px;background:radial-gradient(ellipse at center,#edf8fd99,transparent 70%)}.empty::before{content:'';display:block;width:32px;height:32px;border-radius:50% 50% 50% 7px;transform:rotate(45deg);background:linear-gradient(145deg,var(--blue),var(--aqua));margin:0 auto 23px;box-shadow:0 7px 20px #0a67aa22}.empty strong{color:var(--navy)}
-.notice{background:#edf8fdd9;border:1px solid #c3dfed;border-left:4px solid var(--aqua);border-radius:12px;color:#3f667c;line-height:1.7}.toolbar{font-size:12px}.toolbar #selectionCount{margin-right:auto}
-footer{font-size:10px;color:#5c7a8e;border-color:#d1e5f0;gap:20px}
-dialog{border:1px solid #c2ddea;border-top:5px solid var(--blue);border-radius:20px;box-shadow:0 25px 100px #06427538;background:linear-gradient(155deg,#fff,#f5fbfe)}dialog::backdrop{background:#082e4a66;backdrop-filter:blur(5px)}.modal-head h2{margin:0}.modal-head button{background:#eaf5fc;padding:4px 12px}.form-actions{border-color:var(--line);margin-top:15px}
-.login{padding:35px 20px;background:radial-gradient(circle at 13% 20%,#21b4dc21,transparent 28rem),radial-gradient(circle at 90% 80%,#0a67aa18,transparent 30rem)}
-.login-card{position:relative;overflow:hidden;width:470px;max-width:100%;background:#ffffffef;padding:40px 44px 28px;border:1px solid #bfdae9;border-radius:24px;box-shadow:0 20px 65px #06427520}.waterline{position:absolute;inset:0 0 auto;height:7px;background:linear-gradient(90deg,var(--navy),var(--blue) 52%,var(--aqua))}
-.login-card .brand{padding:0;display:flex;align-items:center;gap:20px;text-align:left}.login-card .brand img{width:152px;height:62px;margin:0}.login-card .brand span{font-size:9px;line-height:1.8;letter-spacing:1.8px;border-left:1px solid var(--line);padding-left:20px;margin:0;max-width:140px}
-.login-eyebrow{font-size:10px;color:var(--blue);letter-spacing:1.8px;font-weight:750;margin-top:35px}.login-card h1{font-size:38px;line-height:1.12;margin:24px 0 12px}.login-card>p{font-size:13px}.login-card form .primary{min-height:47px}.login-partner{display:flex;align-items:center;justify-content:space-between;gap:20px;border-top:1px solid var(--line);padding-top:22px;margin-top:24px}.login-partner img{width:125px;height:50px;object-fit:contain}.login-partner span{font-size:11px;color:#586f7e;line-height:1.6}
-#toast{background:var(--navy);border:1px solid #2773a2;border-radius:13px;box-shadow:0 10px 40px #06427530;max-width:min(450px,calc(100vw - 32px));font-size:13px}pre{background:#edf6fb;border-radius:10px}a{color:var(--blue)}.campaign strong{font-size:28px;color:var(--navy)}summary{cursor:pointer;color:var(--navy)}hr{border:0;border-top:1px solid var(--line);margin:24px 0}
-input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--aqua);outline-offset:2px;box-shadow:0 0 0 4px #21b4dc15}
-@media(min-width:1200px) and (max-width:1450px){#content>.heading{align-items:flex-start;flex-direction:column}.actions{align-self:flex-end}}
-@media(max-width:1199px){aside{width:210px;padding:28px 16px}.brand img{height:57px}main{margin-left:210px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:18px}.stat small{font-size:10px}header{padding:15px 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}.panel>.heading{gap:8px}.actions{flex-wrap:wrap}#content>.heading{padding:26px}}
-@media(max-width:760px){aside{position:static;width:auto;padding:15px 18px;background:#ffffffeb}.brand{display:flex;align-items:center;gap:15px;padding:0}.brand img{width:105px;height:40px;margin:0}.brand span{display:block;margin:0;font-size:8px;letter-spacing:1.6px}.nav-title{display:none}.aside-bottom{display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px 0 0;font-size:10px}.aside-bottom p{margin:0}.aside-bottom button{margin-left:auto;padding:0;font-size:10px}nav{display:flex;margin-top:16px;gap:6px}nav button{font-size:11px;padding:10px;flex:1;text-align:center;border-radius:9px}main{margin:0}header{height:60px;padding:10px 18px;font-size:9px}.header-brand img{width:91px;height:36px}header b{font-size:10px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.stat{padding:18px}.stat strong{font-size:30px}.stat span{font-size:10px}#content>.heading{padding:24px 19px;gap:20px;border-radius:17px}h1{font-size:28px}.heading p{font-size:12px;line-height:1.7}.actions{width:100%;gap:8px}.actions button{flex:1;padding:11px 9px;font-size:11px}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:17px;border-radius:15px}.filters{gap:9px}.filters input,.filters select{padding:11px 9px;font-size:11px}.toolbar{flex-wrap:wrap;gap:8px}.toolbar button{padding:9px 10px;font-size:11px}.toolbar #selectionCount{width:100%;margin-bottom:4px}.campaign{flex-wrap:wrap}.campaign>div:first-child{width:100%}footer{padding:18px}footer span{display:none}dialog{padding:22px 18px;border-radius:17px}.notice{padding:13px 15px;font-size:11px}.login-card{padding:32px 27px 25px}.login-card h1{font-size:34px}.login-card .brand img{width:135px}.login-card .brand span{padding-left:15px}.login-partner span{font-size:10px}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
-</file>
-
-<file path="scripts/browser-check.js">
-const {chromium}=require('@playwright/test');
-const fs=require('fs');const os=require('os');const path=require('path');const assert=require('assert/strict');
-const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-ui-'));process.env.DATA_DIR=dir;
-const {app,db}=require('../server');
-(async()=>{const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const browser=await chromium.launch({channel:'msedge',headless:true});try{const page=await browser.newPage({viewport:{width:1440,height:960}});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}`);await page.getByLabel('Clave de instalación').fill(fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8'));await page.getByLabel('Usuario',{exact:true}).fill('admin');await page.getByLabel('Contraseña',{exact:true}).fill('prueba-ui-segura-123');await page.getByRole('button',{name:'Crear administrador'}).click();await page.getByRole('button',{name:'Nuevo postulante'}).click();await page.getByLabel('Nombre y apellido').fill('Postulante de prueba');await page.getByLabel('WhatsApp del chat').fill('1155550000');await page.getByLabel('Teléfono indicado en el CV').fill('1166660000');assert.equal(await page.locator('#phoneWarning').isVisible(),true);await page.getByRole('button',{name:'Guardar ficha'}).click();await page.getByRole('button',{name:'Ver ficha'}).waitFor();await page.getByRole('button',{name:'Convocatorias',exact:false}).first().click();await page.getByRole('button',{name:'Nueva convocatoria'}).click();await page.getByLabel('Título',{exact:true}).fill('Entrevistas de prueba');await page.getByLabel('Fecha',{exact:true}).fill('2026-09-16');await page.getByLabel('Horario de inicio').fill('09:00');await page.getByRole('button',{name:'Crear convocatoria'}).click();await page.getByRole('button',{name:'Ver convocatoria'}).waitFor();await page.getByRole('button',{name:'Postulantes',exact:false}).first().click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'Agregar a convocatoria'}).click();await page.getByRole('button',{name:'Agregar selección'}).click();await page.locator('dialog').waitFor({state:'hidden'});await page.screenshot({path:path.join(__dirname,'..','data','panel-verificado.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);assert.deepEqual(errors,[]);console.log('Prueba visual OK: instalación, login, ficha, aviso de teléfonos, convocatoria y selección; escritorio y móvil.');}finally{await browser.close();await new Promise(r=>server.close(r));db.close();fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
+<file path="repomix.config.json">
+{
+  "$schema": "https://repomix.com/schemas/latest/schema.json",
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "fileSummary": true,
+    "directoryStructure": true,
+    "removeComments": false
+  },
+  "include": [
+    "server.js",
+    "ocr.py",
+    "iniciar.cmd",
+    "public/**",
+    "scripts/**",
+    "test/**",
+    "README.md",
+    "package.json",
+    "repomix.config.json",
+    ".gitignore",
+    ".repomixignore",
+    "docs/**",
+    "lib/**",
+    "extract_cv.py",
+    ".puppeteerrc.cjs",
+    "iniciar-recepcion.cmd"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "data/**",
+      "backups/**",
+      "node_modules/**",
+      ".git/**",
+      ".env*",
+      "*.sqlite*",
+      "*.db",
+      "*.pem",
+      "*.key",
+      "repomix-output.*",
+      "package-lock.json"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}
 </file>
 
 <file path="server.js">
@@ -387,20 +1363,15 @@ app.use('/api',(req,res,next)=>{const token=(req.headers.cookie||'').match(/(?:^
 app.get('/api/me',(req,res)=>res.json(req.user));
 app.post('/api/logout',(req,res)=>{const token=(req.headers.cookie||'').match(/(?:^|;\s*)rrhh=([a-f0-9]+)/)?.[1]||'';db.prepare('DELETE FROM sessions WHERE token=?').run(crypto.createHash('sha256').update(token).digest('hex'));res.clearCookie('rrhh');res.json({ok:true});});
 app.post('/api/users',wrap((req,res)=>{if(req.user.role!=='admin')fail('Solo administradores',403);credentials(req.body);if(db.prepare('SELECT id FROM users WHERE username=?').get(req.body.username))fail('El usuario ya existe');db.prepare('INSERT INTO users(username,hash,role) VALUES (?,?,?)').run(req.body.username,hash(req.body.password),'recruiter');audit(req,'Usuario creado');res.json({ok:true});}));
-const fields=['name','phone','cvPhone','locality','address','license','licenseExpiry','adult','distance','availability','experience','notes','status','source'];
+const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:15*1024*1024,files:1}});
+const services=require('./lib/application').install(app,db,root,upload,wrap);
+const fields=['name','phone','cvPhone','locality','address','license','licenseExpiry','adult','distance','availability','experience','notes','status','source','dniConfirmed','birthDate','declaredAge','ageReference','reviewState'];
 const statuses=['Pendiente','Revisado','Preseleccionado','Archivado'];
 function candidate(body){const row={};for(const key of fields)row[key]=String(body[key]??'').trim().slice(0,key==='notes'||key==='experience'?12000:500);if(!row.name)fail('Completá nombre y apellido');row.distance=body.distance===''||body.distance==null?null:Number(body.distance);if(row.distance!==null&&(!Number.isFinite(row.distance)||row.distance<0||row.distance>10000))fail('Distancia inválida');row.status=row.status||'Pendiente';if(!statuses.includes(row.status))fail('Estado inválido');row.adult=row.adult||'Por confirmar';if(!['Por confirmar','Sí','No'].includes(row.adult))fail('Mayoría de edad inválida');row.source=row.source||'Carga manual';return row;}
 const insert=db.prepare(`INSERT INTO candidates(${fields.join(',')}) VALUES (${fields.map(k=>'@'+k).join(',')})`);
 app.get('/api/candidates',(req,res)=>res.json(db.prepare('SELECT * FROM candidates ORDER BY id DESC').all()));
 app.post('/api/candidates',wrap((req,res)=>{const info=insert.run(candidate(req.body));audit(req,`Ficha creada ${info.lastInsertRowid}`);res.json({id:info.lastInsertRowid});}));
 app.put('/api/candidates/:id',wrap((req,res)=>{const info=db.prepare(`UPDATE candidates SET ${fields.map(k=>k+'=@'+k).join(',')},version=version+1 WHERE id=@id AND version=@version`).run({...candidate(req.body),id:Number(req.params.id),version:Number(req.body.version)});if(!info.changes)fail('Otra persona modificó la ficha. Cerrala y volvé a abrirla antes de guardar.',409);audit(req,`Ficha editada ${req.params.id}`);res.json({ok:true});}));
-const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:15*1024*1024,files:1}});
-app.get('/api/candidates/:id/documents',(req,res)=>res.json(db.prepare('SELECT id,original,text,status FROM documents WHERE candidate_id=?').all(req.params.id)));
-app.get('/api/documents/:id',wrap((req,res)=>{const doc=db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);if(!doc)fail('Archivo no encontrado',404);res.download(path.join(root,'cv',doc.path),doc.original);}));
-app.post('/api/candidates/:id/documents',upload.single('file'),wrap(async(req,res)=>{if(!db.prepare('SELECT id FROM candidates WHERE id=?').get(req.params.id))fail('Ficha no encontrada',404);if(!req.file)fail('Seleccioná un CV');const ext=path.extname(req.file.originalname).toLowerCase();if(!['.pdf','.png','.jpg','.jpeg'].includes(ext))fail('Se admiten PDF, PNG y JPG');const filename=crypto.randomUUID()+ext;const target=path.join(root,'cv',filename);fs.writeFileSync(target,req.file.buffer);const info=db.prepare('INSERT INTO documents(candidate_id,original,path,text,status) VALUES (?,?,?,?,?)').run(req.params.id,path.basename(req.file.originalname),filename,'','Procesando');res.json({id:info.lastInsertRowid});processDocument(info.lastInsertRowid,target,ext).catch(()=>db.prepare('UPDATE documents SET status=? WHERE id=?').run('No se pudo leer. Revisar el original.',info.lastInsertRowid));audit(req,`CV cargado en ficha ${req.params.id}`);}));
-let ocrQueue=Promise.resolve();
-async function processDocument(id,target,ext){let text='';if(ext==='.pdf'){try{text=(await pdf(fs.readFileSync(target))).text;}catch{}}if(text.trim().length<40){const localSpanish=fs.existsSync(path.join(root,'tessdata','spa.traineddata'));const job=()=>run(process.env.PYTHON_BIN||'python',[path.join(__dirname,'ocr.py'),target,process.env.TESSERACT_BIN||'C:\\Program Files\\Tesseract-OCR\\tesseract.exe',process.env.OCR_LANG||(localSpanish?'spa':'eng')],{timeout:180000,maxBuffer:4*1024*1024,windowsHide:true,env:{...process.env,...(localSpanish&&!process.env.OCR_LANG?{TESSDATA_PREFIX:path.join(root,'tessdata')}:{})}}).then(r=>r.stdout);const result=ocrQueue.then(job);ocrQueue=result.catch(()=>{});text=await result;}db.prepare('UPDATE documents SET text=?,status=? WHERE id=?').run(text.slice(0,200000),text.trim()?'Lectura lista · revisar datos':'Sin texto legible · revisar original',id);}
-db.prepare("UPDATE documents SET status='Lectura interrumpida · volver a cargar' WHERE status='Procesando'").run();
 const {previewWorkbook}=require('./scripts/excel-import');
 app.post('/api/import/preview',upload.single('file'),wrap(async(req,res)=>{if(!req.file||path.extname(req.file.originalname).toLowerCase()!=='.xlsx')fail('Seleccioná un archivo XLSX');try{res.json(await previewWorkbook(req.file.buffer,path.basename(req.file.originalname)));}catch(error){fail(error.message);}}));
 app.post('/api/import/commit',wrap((req,res)=>{if(!Array.isArray(req.body.rows)||req.body.rows.length>2000)fail('Importación inválida');let added=0,skipped=0;db.transaction(()=>{for(const raw of req.body.rows){const row=candidate({...raw,status:'Pendiente',source:raw.source||'Excel · revisión pendiente'});if(db.prepare('SELECT id FROM candidates WHERE name=? AND phone=? AND cvPhone=?').get(row.name,row.phone,row.cvPhone)){skipped++;continue;}insert.run(row);added++;}})();audit(req,`Excel: ${added} fichas importadas`);res.json({added,skipped});}));
@@ -412,112 +1383,16 @@ app.put('/api/campaigns/:id/invitations/:candidate',wrap((req,res)=>{if(!invitat
 app.post('/api/backup',wrap(async(req,res)=>{if(req.user.role!=='admin')fail('Solo administradores',403);const dest=path.resolve(__dirname,'backups',new Date().toISOString().replace(/[:.]/g,'-'));fs.mkdirSync(dest,{recursive:true});await db.backup(path.join(dest,'rrhh.sqlite'));fs.cpSync(path.join(root,'cv'),path.join(dest,'cv'),{recursive:true});audit(req,'Copia de seguridad creada');res.json({path:dest});}));
 app.use(express.static(path.join(__dirname,'public')));
 app.use((err,req,res,next)=>{console.error(err.message);res.status(err.status||400).json({error:err.code==='LIMIT_FILE_SIZE'?'El archivo supera 15 MB':err.status?err.message:'No se pudo completar la operación. Revisá el archivo o los datos.'});});
-if(require.main===module){const port=Number(process.env.PORT||3050);app.listen(port,process.env.HOST||'0.0.0.0',()=>{console.log(`RRHH IVESS disponible en http://localhost:${port}`);if(setupToken)console.log('Primera instalación: consultá data/clave-inicial.txt para crear el administrador.');});}
-module.exports={app,db};
-</file>
-
-<file path="test/integration.test.js">
-const {test,after}=require('node:test');
-const assert=require('node:assert/strict');
-const fs=require('fs');
-const os=require('os');
-const path=require('path');
-const ExcelJS=require('exceljs');
-const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-test-'));
-process.env.DATA_DIR=dir;
-const {app,db}=require('../server');
-const server=app.listen(0,'127.0.0.1');
-let cookie='';
-async function request(route,method='GET',body,auth=true){const response=await fetch(`http://127.0.0.1:${server.address().port}/api${route}`,{method,headers:{...(body instanceof FormData?{}:{'Content-Type':'application/json'}),...(auth?{Cookie:cookie}:{})},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.json(),headers:response.headers};}
-test('Acceso, fichas concurrentes, importación, convocatorias y permisos',async()=>{
- assert.equal((await request('/candidates')).status,401);
- assert.equal((await request('/setup','POST',{username:'admin',password:'correcta-prueba-123',token:'incorrecto'})).status,403);
- assert.equal((await request('/setup','POST',{username:'admin',password:'correcta-prueba-123',token:fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8')})).status,200);
- const login=await request('/login','POST',{username:'admin',password:'correcta-prueba-123'});cookie=login.headers.get('set-cookie').split(';')[0];
- const created=await request('/candidates','POST',{name:'Persona de prueba',phone:'1112345678',license:'C1',distance:10});assert.equal(created.status,200);
- const id=created.body.id;let row=(await request('/candidates')).body[0];assert.equal(row.name,'Persona de prueba');
- assert.equal((await request('/candidates/'+id,'PUT',{...row,status:'Revisado'})).status,200);
- assert.equal((await request('/candidates/'+id,'PUT',{...row,status:'Archivado'})).status,409);
- const campaign=await request('/campaigns','POST',{title:'Entrevistas de prueba',date:'2026-09-16',time:'09:00',capacity:1});const cid=campaign.body.id;
- assert.equal((await request(`/campaigns/${cid}/invitations`,'POST',{ids:[id]})).status,200);
- const second=(await request('/candidates','POST',{name:'Otra persona'})).body.id;
- assert.equal((await request(`/campaigns/${cid}/invitations`,'POST',{ids:[second]})).status,400);
- assert.equal((await request(`/campaigns/${cid}/invitations/${id}`,'PUT',{status:'Confirmó'})).status,200);
- assert.equal((await request('/campaigns')).body[0].invitations[0].status,'Confirmó');
- const book=new ExcelJS.Workbook();book.addWorksheet('Postulantes').addRows([['Nombre y apellido','WhatsApp','Localidad','Licencia'],['Importado','1122223333','Virrey del Pino','B1']]);const form=new FormData();form.append('file',new Blob([await book.xlsx.writeBuffer()]),'prueba.xlsx');
- const preview=await request('/import/preview','POST',form);assert.equal(preview.body.rows[0].name,'Importado');
- assert.equal((await request('/import/commit','POST',{rows:preview.body.rows})).body.added,1);
- assert.equal((await request('/import/commit','POST',{rows:preview.body.rows})).body.skipped,1);
- const rollback=await request('/import/commit','POST',{rows:[{name:'No debe guardarse'},{name:''}]});assert.equal(rollback.status,400);assert.equal((await request('/candidates')).body.length,3);
- const invalid=new FormData();invalid.append('file',new Blob(['executable']),'programa.exe');assert.equal((await request(`/candidates/${id}/documents`,'POST',invalid)).status,400);
- assert.equal((await request('/users','POST',{username:'operador',password:'otra-clave-prueba-123'})).status,200);
- const login2=await request('/login','POST',{username:'operador',password:'otra-clave-prueba-123'});cookie=login2.headers.get('set-cookie').split(';')[0];
- assert.equal((await request('/users','POST',{username:'tercero',password:'otra-clave-prueba-123'})).status,403);
- assert.equal((await request('/backup','POST')).status,403);
- await request('/logout','POST');assert.equal((await request('/candidates')).status,401);
-});
-after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(dir,{recursive:true,force:true});});
-</file>
-
-<file path=".gitignore">
-node_modules/
-data/
-backups/
-*.log
-.env
-.env.*
-!.env.example
-*.sqlite*
-*.db
-*.pem
-*.key
-__pycache__/
-</file>
-
-<file path="package.json">
-{
-  "name": "rrhh-ivess",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": {
-    "test": "node --test",
-    "start": "node server.js",
-    "repomix": "repomix",
-    "repomix:stdout": "repomix --stdout"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "better-sqlite3": "^11.10.0",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.7.0",
-    "helmet": "^8.3.0",
-    "multer": "^2.3.0",
-    "pdf-parse": "^1.1.1"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "repomix": "1.14.1"
-  },
-  "overrides": {
-    "exceljs": {
-      "uuid": "11.1.1"
-    }
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/marcosmartinezaesa/rrhh.git"
-  }
-}
+if(require.main===module){services.start();const port=Number(process.env.PORT||3050);app.listen(port,process.env.HOST||'0.0.0.0',()=>{console.log(`RRHH IVESS disponible en http://localhost:${port}`);if(setupToken)console.log('Primera instalación: consultá data/clave-inicial.txt para crear el administrador.');});}
+module.exports={app,db,services};
 </file>
 
 <file path="README.md">
 # RRHH IVESS
 
 Aplicación web interna para centralizar postulantes y organizar entrevistas. Node.js 20, Express y SQLite; los navegadores comparten la base del servidor.
+
+**Versión de recepción disponible para probar:** http://192.168.1.187:3051. Usa el mismo administrador y los siete postulantes conservados. Se inició en 3051 porque la revisión automática bloqueó el reinicio del proceso anterior en 3050. El puerto predeterminado del código sigue siendo 3050; `iniciar-recepcion.cmd` permite iniciar explícitamente en 3051. No ejecutar dos conexiones de WhatsApp RRHH a la vez.
 
 ## Iniciar en esta PC
 
@@ -528,7 +1403,13 @@ Aplicación web interna para centralizar postulantes y organizar entrevistas. No
 
 No se abrieron puertos del firewall ni se configuró el router. Para redes no confiables, usar HTTPS mediante un proxy y `COOKIE_SECURE=1`.
 
-## Funciones implementadas
+## Circuito actual: recepción de CV
+
+La prioridad actual es **WhatsApp por QR → sincronizar → revisar postulantes y experiencia → descargar ZIP por fechas**. El administrador existente se conserva. Ver [guía de recepción, migración y pruebas](docs/recepcion-cv.md).
+
+WhatsApp se inicia desde el panel por un administrador, con sesión exclusiva de RRHH. El escaneo y las pruebas en la cuenta real están pendientes del usuario. La navegación no incluye evaluaciones ni convocatorias.
+
+## Funciones de la base anterior conservadas
 
 - Administrador y operadores, contraseñas con scrypt, sesiones de 8 horas, límites de intentos y registro de acciones.
 - Fichas persistentes: WhatsApp del chat separado del teléfono del CV, localidad, domicilio, licencia, vencimiento, mayoría de edad declarada, distancia, traslado, experiencia y notas.
@@ -557,7 +1438,7 @@ El inicio automático y las copias programadas no están configurados. `iniciar.
 
 Se recibió `transferencias-main.zip` y se revisó su conexión de WhatsApp: ver [notas de referencia](docs/transferencias-referencia.md). El ZIP original queda en `data/referencias`, excluido de GitHub y Repomix. También se recibió `Evaluacion_CVs_2026-09-09.xlsx`; su original y los datos importados se conservan solo en el servidor. Sigue pendiente `INICIAR_RRHH_IVESS_CODEX.md`. No se importaron candidatos ficticios como datos reales.
 
-WhatsApp queda pendiente: QR, sesión independiente, importación de chats/adjuntos, conciliación del teléfono de origen y sincronización de respuestas. También quedan para ampliación la extracción estructurada avanzada de CV, geocodificación/distancias verificadas y turnos individuales. No reutilizar ni modificar sesiones de los otros proyectos.
+La conexión real por QR, la sincronización y la descarga por fechas están implementadas; falta validarlas con la cuenta real. No se envían mensajes, no se sincronizan confirmaciones y no se desarrolla selección laboral en esta etapa. No reutilizar ni modificar sesiones de los otros proyectos.
 
 Documentación de dependencias: [ExcelJS](https://www.npmjs.com/package/exceljs), [better-sqlite3](https://www.npmjs.com/package/better-sqlite3), [pdf-parse](https://www.npmjs.com/package/pdf-parse).
 
@@ -573,53 +1454,8 @@ La configuración mantiene la [revisión de seguridad de Repomix](https://repomi
 Repomix está fijado en 1.14.1 (correcciones de seguridad). Declara Node.js 22 o superior; la generación local fue verificada también con Node 20.19.4, pero para usar la herramienta en otras PC corresponde Node 22+. El servidor actual sigue usando Node 20.
 
 Importación local de administración: `node scripts/import-excel.js RUTA.xlsx` muestra el conteo. Agregar `--apply` carga las fichas en una transacción y crea previamente una copia de la base en `data/import-backups`. No adjunta los CV mencionados en el Excel: esos archivos deben cargarse por separado.
-</file>
 
-<file path="repomix.config.json">
-{
-  "$schema": "https://repomix.com/schemas/latest/schema.json",
-  "output": {
-    "filePath": "repomix-output.xml",
-    "style": "xml",
-    "fileSummary": true,
-    "directoryStructure": true,
-    "removeComments": false
-  },
-  "include": [
-    "server.js",
-    "ocr.py",
-    "iniciar.cmd",
-    "public/**",
-    "scripts/**",
-    "test/**",
-    "README.md",
-    "package.json",
-    "repomix.config.json",
-    ".gitignore",
-    ".repomixignore",
-    "docs/**"
-  ],
-  "ignore": {
-    "useGitignore": true,
-    "useDefaultPatterns": true,
-    "customPatterns": [
-      "data/**",
-      "backups/**",
-      "node_modules/**",
-      ".git/**",
-      ".env*",
-      "*.sqlite*",
-      "*.db",
-      "*.pem",
-      "*.key",
-      "repomix-output.*",
-      "package-lock.json"
-    ]
-  },
-  "security": {
-    "enableSecurityCheck": true
-  }
-}
+Prueba del circuito actual en navegador: `node scripts/browser-reception.js`. La comprobación antigua `browser-check.js` corresponde a la navegación anterior.
 </file>
 
 </files>

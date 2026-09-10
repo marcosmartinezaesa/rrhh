@@ -19,7 +19,11 @@
     "repomix.config.json",
     ".gitignore",
     ".repomixignore",
-    "docs/**"
+    "docs/**",
+    "lib/**",
+    "extract_cv.py",
+    ".puppeteerrc.cjs",
+    "iniciar-recepcion.cmd"
   ],
   "ignore": {
     "useGitignore": true,

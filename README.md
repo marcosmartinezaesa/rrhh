@@ -2,6 +2,8 @@
 
 Aplicación web interna para centralizar postulantes y organizar entrevistas. Node.js 20, Express y SQLite; los navegadores comparten la base del servidor.
 
+**Versión de recepción disponible para probar:** http://192.168.1.187:3051. Usa el mismo administrador y los siete postulantes conservados. Se inició en 3051 porque la revisión automática bloqueó el reinicio del proceso anterior en 3050. El puerto predeterminado del código sigue siendo 3050; `iniciar-recepcion.cmd` permite iniciar explícitamente en 3051. No ejecutar dos conexiones de WhatsApp RRHH a la vez.
+
 ## Iniciar en esta PC
 
 1. Ejecutar `iniciar.cmd` o `npm start` en `C:\RRHH`.
@@ -11,7 +13,13 @@ Aplicación web interna para centralizar postulantes y organizar entrevistas. No
 
 No se abrieron puertos del firewall ni se configuró el router. Para redes no confiables, usar HTTPS mediante un proxy y `COOKIE_SECURE=1`.
 
-## Funciones implementadas
+## Circuito actual: recepción de CV
+
+La prioridad actual es **WhatsApp por QR → sincronizar → revisar postulantes y experiencia → descargar ZIP por fechas**. El administrador existente se conserva. Ver [guía de recepción, migración y pruebas](docs/recepcion-cv.md).
+
+WhatsApp se inicia desde el panel por un administrador, con sesión exclusiva de RRHH. El escaneo y las pruebas en la cuenta real están pendientes del usuario. La navegación no incluye evaluaciones ni convocatorias.
+
+## Funciones de la base anterior conservadas
 
 - Administrador y operadores, contraseñas con scrypt, sesiones de 8 horas, límites de intentos y registro de acciones.
 - Fichas persistentes: WhatsApp del chat separado del teléfono del CV, localidad, domicilio, licencia, vencimiento, mayoría de edad declarada, distancia, traslado, experiencia y notas.
@@ -40,7 +48,7 @@ El inicio automático y las copias programadas no están configurados. `iniciar.
 
 Se recibió `transferencias-main.zip` y se revisó su conexión de WhatsApp: ver [notas de referencia](docs/transferencias-referencia.md). El ZIP original queda en `data/referencias`, excluido de GitHub y Repomix. También se recibió `Evaluacion_CVs_2026-09-09.xlsx`; su original y los datos importados se conservan solo en el servidor. Sigue pendiente `INICIAR_RRHH_IVESS_CODEX.md`. No se importaron candidatos ficticios como datos reales.
 
-WhatsApp queda pendiente: QR, sesión independiente, importación de chats/adjuntos, conciliación del teléfono de origen y sincronización de respuestas. También quedan para ampliación la extracción estructurada avanzada de CV, geocodificación/distancias verificadas y turnos individuales. No reutilizar ni modificar sesiones de los otros proyectos.
+La conexión real por QR, la sincronización y la descarga por fechas están implementadas; falta validarlas con la cuenta real. No se envían mensajes, no se sincronizan confirmaciones y no se desarrolla selección laboral en esta etapa. No reutilizar ni modificar sesiones de los otros proyectos.
 
 Documentación de dependencias: [ExcelJS](https://www.npmjs.com/package/exceljs), [better-sqlite3](https://www.npmjs.com/package/better-sqlite3), [pdf-parse](https://www.npmjs.com/package/pdf-parse).
 
@@ -56,3 +64,5 @@ La configuración mantiene la [revisión de seguridad de Repomix](https://repomi
 Repomix está fijado en 1.14.1 (correcciones de seguridad). Declara Node.js 22 o superior; la generación local fue verificada también con Node 20.19.4, pero para usar la herramienta en otras PC corresponde Node 22+. El servidor actual sigue usando Node 20.
 
 Importación local de administración: `node scripts/import-excel.js RUTA.xlsx` muestra el conteo. Agregar `--apply` carga las fichas en una transacción y crea previamente una copia de la base en `data/import-backups`. No adjunta los CV mencionados en el Excel: esos archivos deben cargarse por separado.
+
+Prueba del circuito actual en navegador: `node scripts/browser-reception.js`. La comprobación antigua `browser-check.js` corresponde a la navegación anterior.

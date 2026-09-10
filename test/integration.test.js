@@ -12,6 +12,7 @@ let cookie='';
 async function request(route,method='GET',body,auth=true){const response=await fetch(`http://127.0.0.1:${server.address().port}/api${route}`,{method,headers:{...(body instanceof FormData?{}:{'Content-Type':'application/json'}),...(auth?{Cookie:cookie}:{})},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});return {status:response.status,body:await response.json(),headers:response.headers};}
 test('Acceso, fichas concurrentes, importación, convocatorias y permisos',async()=>{
  assert.equal((await request('/candidates')).status,401);
+ for(const route of ['/whatsapp','/sync','/files/unknown','/exports/unknown/download'])assert.equal((await request(route)).status,401);
  assert.equal((await request('/setup','POST',{username:'admin',password:'correcta-prueba-123',token:'incorrecto'})).status,403);
  assert.equal((await request('/setup','POST',{username:'admin',password:'correcta-prueba-123',token:fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8')})).status,200);
  const login=await request('/login','POST',{username:'admin',password:'correcta-prueba-123'});cookie=login.headers.get('set-cookie').split(';')[0];
@@ -35,6 +36,9 @@ test('Acceso, fichas concurrentes, importación, convocatorias y permisos',async
  const login2=await request('/login','POST',{username:'operador',password:'otra-clave-prueba-123'});cookie=login2.headers.get('set-cookie').split(';')[0];
  assert.equal((await request('/users','POST',{username:'tercero',password:'otra-clave-prueba-123'})).status,403);
  assert.equal((await request('/backup','POST')).status,403);
+ assert.equal((await request('/whatsapp/connect','POST',{exclusiveAccount:true})).status,403);
+ assert.equal((await request('/sync','POST',{start:'2026-09-09',end:'2026-09-10'})).status,403);
+ assert.equal((await request('/whatsapp')).body.qr,null);
  await request('/logout','POST');assert.equal((await request('/candidates')).status,401);
 });
 after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(dir,{recursive:true,force:true});});
