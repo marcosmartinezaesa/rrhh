@@ -38,8 +38,19 @@ El inicio automático y las copias programadas no están configurados. `iniciar.
 
 ## Pendiente de los archivos de referencia
 
-No se recibieron `Evaluacion_CVs_2026-09-09.xlsx`, `transferencias-main.zip` ni `INICIAR_RRHH_IVESS_CODEX.md`: el único adjunto fue la conversación. No se importaron candidatos ficticios como datos reales.
+Se recibió `transferencias-main.zip` y se revisó su conexión de WhatsApp: ver [notas de referencia](docs/transferencias-referencia.md). El ZIP original queda en `data/referencias`, excluido de GitHub y Repomix. Siguen pendientes `Evaluacion_CVs_2026-09-09.xlsx` e `INICIAR_RRHH_IVESS_CODEX.md`. No se importaron candidatos ficticios como datos reales.
 
 WhatsApp queda pendiente: QR, sesión independiente, importación de chats/adjuntos, conciliación del teléfono de origen y sincronización de respuestas. También quedan para ampliación la extracción estructurada avanzada de CV, geocodificación/distancias verificadas y turnos individuales. No reutilizar ni modificar sesiones de los otros proyectos.
 
 Documentación de dependencias: [ExcelJS](https://www.npmjs.com/package/exceljs), [better-sqlite3](https://www.npmjs.com/package/better-sqlite3), [pdf-parse](https://www.npmjs.com/package/pdf-parse).
+
+
+## GitHub y Repomix
+
+Repositorio: https://github.com/marcosmartinezaesa/rrhh
+
+Ejecutar `npm run repomix` para actualizar `repomix-output.xml`, el resumen del código para compartir contexto. Se versiona junto al proyecto; regenerarlo antes de subir cambios. `npm run repomix:stdout` permite obtenerlo por consola.
+
+La configuración mantiene la [revisión de seguridad de Repomix](https://repomix.com/guide/security) y excluye CV, datos, copias, sesiones, secretos y dependencias instaladas. Los logos binarios se conservan en GitHub; Repomix resume archivos de texto.
+
+Repomix está fijado en 1.14.1 (correcciones de seguridad). Declara Node.js 22 o superior; la generación local fue verificada también con Node 20.19.4, pero para usar la herramienta en otras PC corresponde Node 22+. El servidor actual sigue usando Node 20.

@@ -10,4 +10,3 @@ backups/
 *.pem
 *.key
 __pycache__/
-repomix-output.*

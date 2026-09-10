@@ -7,11 +7,38 @@
     "directoryStructure": true,
     "removeComments": false
   },
-  "include": ["server.js", "ocr.py", "iniciar.cmd", "public/**", "scripts/**", "test/**", "README.md", "package.json", "repomix.config.json", ".gitignore", ".repomixignore"],
+  "include": [
+    "server.js",
+    "ocr.py",
+    "iniciar.cmd",
+    "public/**",
+    "scripts/**",
+    "test/**",
+    "README.md",
+    "package.json",
+    "repomix.config.json",
+    ".gitignore",
+    ".repomixignore",
+    "docs/**"
+  ],
   "ignore": {
     "useGitignore": true,
     "useDefaultPatterns": true,
-    "customPatterns": ["data/**", "backups/**", "node_modules/**", ".git/**", ".env*", "*.sqlite*", "*.db", "*.pem", "*.key", "repomix-output.*", "package-lock.json"]
+    "customPatterns": [
+      "data/**",
+      "backups/**",
+      "node_modules/**",
+      ".git/**",
+      ".env*",
+      "*.sqlite*",
+      "*.db",
+      "*.pem",
+      "*.key",
+      "repomix-output.*",
+      "package-lock.json"
+    ]
   },
-  "security": {"enableSecurityCheck": true}
+  "security": {
+    "enableSecurityCheck": true
+  }
 }
