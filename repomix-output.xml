@@ -85,6 +85,21 @@ This section contains the contents of the repository's files.
 module.exports = {skipDownload: true};
 </file>
 
+<file path=".repomixignore">
+data/
+backups/
+node_modules/
+.git/
+.env*
+*.sqlite*
+*.db
+*.pem
+*.key
+*.log
+repomix-output.*
+package-lock.json
+</file>
+
 <file path="docs/recepcion-cv.md">
 # Recepción de CV y experiencia laboral
 
@@ -161,6 +176,24 @@ La auditoría npm detecta avisos heredados de `extract-zip`, dependencia del des
 Documentación: [whatsapp-web.js](https://docs.wwebjs.dev/Client.html), [Archiver](https://www.archiverjs.com/docs/quickstart/).
 </file>
 
+<file path="docs/transferencias-referencia.md">
+# Referencia recibida: Transferencias
+
+Se recibió y revisó `transferencias-main.zip`. El original se conserva localmente en `data/referencias/`, fuera de Git y Repomix.
+
+Componentes identificados en el código de referencia:
+
+- `whatsapp-web.js` con `Client` y `LocalAuth` en `app/index.js`.
+- Sesión persistente en `sesion_whatsapp`, navegador configurable y ejecución sin ventana.
+- Evento `qr` para vincular y evento `message` para recibir mensajes.
+- Descarga de adjuntos con reintentos y recuperación por identificador de mensaje.
+- Lectura de documentos mediante scripts Python específicos de comprobantes.
+
+La adaptación a RRHH debe crear una sesión independiente y vincular cada CV con el chat de origen. El reconocimiento de importes, bancos y comprobantes de Transferencias no corresponde a la evaluación de currículums.
+
+Esta revisión no activa la conexión de WhatsApp de RRHH ni modifica la sesión de Transferencias. La integración sigue pendiente.
+</file>
+
 <file path="extract_cv.py">
 import sys, subprocess, tempfile, os, json
 import pymupdf
@@ -196,6 +229,13 @@ print(json.dumps({'pages': pages, 'errors': errors}, ensure_ascii=True))
 @echo off
 cd /d "%~dp0"
 set PORT=3051
+node server.js
+pause
+</file>
+
+<file path="iniciar.cmd">
+@echo off
+cd /d "%~dp0"
 node server.js
 pause
 </file>
@@ -713,6 +753,27 @@ class SincronizacionService{
 module.exports={WhatsAppService,SincronizacionService,dateRange,individual};
 </file>
 
+<file path="ocr.py">
+import sys, subprocess, tempfile, os
+import pymupdf
+
+source, binary, language = sys.argv[1:4]
+with tempfile.TemporaryDirectory(prefix='rrhh-ocr-') as folder:
+    paths = [source]
+    if source.lower().endswith('.pdf'):
+        doc = pymupdf.open(source)
+        if len(doc) > 20:
+            raise ValueError('OCR limitado a 20 páginas por CV')
+        paths = []
+        for i, page in enumerate(doc):
+            target = os.path.join(folder, f'{i}.png')
+            page.get_pixmap(matrix=pymupdf.Matrix(2,2)).save(target)
+            paths.append(target)
+    for path in paths:
+        result = subprocess.run([binary,path,'stdout','-l',language],capture_output=True,check=True)
+        sys.stdout.buffer.write(result.stdout + b'\n')
+</file>
+
 <file path="public/reception.js">
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -779,6 +840,14 @@ async function renderSettings(){$('#content').innerHTML=heading('Configuración.
 boot().catch(()=>showLogin());
 </file>
 
+<file path="scripts/browser-check.js">
+const {chromium}=require('@playwright/test');
+const fs=require('fs');const os=require('os');const path=require('path');const assert=require('assert/strict');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-ui-'));process.env.DATA_DIR=dir;
+const {app,db}=require('../server');
+(async()=>{const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const browser=await chromium.launch({channel:'msedge',headless:true});try{const page=await browser.newPage({viewport:{width:1440,height:960}});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}`);await page.getByLabel('Clave de instalación').fill(fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8'));await page.getByLabel('Usuario',{exact:true}).fill('admin');await page.getByLabel('Contraseña',{exact:true}).fill('prueba-ui-segura-123');await page.getByRole('button',{name:'Crear administrador'}).click();await page.getByRole('button',{name:'Nuevo postulante'}).click();await page.getByLabel('Nombre y apellido').fill('Postulante de prueba');await page.getByLabel('WhatsApp del chat').fill('1155550000');await page.getByLabel('Teléfono indicado en el CV').fill('1166660000');assert.equal(await page.locator('#phoneWarning').isVisible(),true);await page.getByRole('button',{name:'Guardar ficha'}).click();await page.getByRole('button',{name:'Ver ficha'}).waitFor();await page.getByRole('button',{name:'Convocatorias',exact:false}).first().click();await page.getByRole('button',{name:'Nueva convocatoria'}).click();await page.getByLabel('Título',{exact:true}).fill('Entrevistas de prueba');await page.getByLabel('Fecha',{exact:true}).fill('2026-09-16');await page.getByLabel('Horario de inicio').fill('09:00');await page.getByRole('button',{name:'Crear convocatoria'}).click();await page.getByRole('button',{name:'Ver convocatoria'}).waitFor();await page.getByRole('button',{name:'Postulantes',exact:false}).first().click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'Agregar a convocatoria'}).click();await page.getByRole('button',{name:'Agregar selección'}).click();await page.locator('dialog').waitFor({state:'hidden'});await page.screenshot({path:path.join(__dirname,'..','data','panel-verificado.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);assert.deepEqual(errors,[]);console.log('Prueba visual OK: instalación, login, ficha, aviso de teléfonos, convocatoria y selección; escritorio y móvil.');}finally{await browser.close();await new Promise(r=>server.close(r));db.close();fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
+</file>
+
 <file path="scripts/browser-reception.js">
 const {chromium}=require('@playwright/test');const fs=require('fs');const os=require('os');const path=require('path');const assert=require('assert/strict');const {execFileSync}=require('child_process');
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-ui-'));process.env.DATA_DIR=dir;
@@ -799,218 +868,6 @@ try{
  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:path.join(__dirname,'../data/panel-recepcion-movil.png'),fullPage:true});assert.deepEqual(errors,[]);
  console.log('UI OK: acceso, navegación, ficha, CV real, empleo, ZIP descargado, escritorio y móvil. No se inició WhatsApp.');
 }finally{await browser.close();services.extraction.stopped=true;while(services.extraction.running)await new Promise(r=>setTimeout(r,50));await services.close();await new Promise(r=>server.close(r));db.close();fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
-</file>
-
-<file path="test/reception.test.js">
-const {test,after}=require('node:test');const assert=require('node:assert/strict');const fs=require('fs');const os=require('os');const path=require('path');
-process.env.DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-reception-'));
-const {db,services}=require('../server');const {repo,cv,extraction,identity,experience,exports:exportsService}=services;cv.extraction=null;
-const {categories,ExperienciaLaboral}=require('../lib/experience');const {dateRange}=require('../lib/whatsapp');const {csvCell}=require('../lib/export');
-const zip=require('jszip');
-const bytes=n=>Buffer.from('%PDF-1.7\nfixture '+n);
-const page=(name,job='')=>[{page:1,text:`Nombre: ${name}\nDNI: 12345678\nExperiencia laboral:\n${job}\n\nEducación\nSecundario`,method:'fixture'}];
-const job='Empresa: Ejemplo\nPuesto: Repartidor\nTareas: repartía mercadería, atendía clientes y cobraba\n2020-01-01 a 2021-01-01';
-function receive(n,{chat='111@c.us',stamp='2026-09-09T12:00:00-03:00',file='a',candidate,caption='Mi CV'}={}){return cv.receive({account:'test',chat,message_id:n,received:stamp,original:'CV.pdf',caption,candidate_id:candidate,isCV:true},bytes(file)).receipt;}
-async function read(r,pages){db.prepare("UPDATE cv_files SET read_state='done',pages=?,extracted=? WHERE hash=?").run(JSON.stringify(pages),JSON.stringify(require('../lib/cv').extractFields(pages)),r.hash);await extraction.process(r.hash);return db.prepare('SELECT * FROM cv_receipts WHERE id=?').get(r.id);}
-test('Recepciones, versiones cronológicas, identidad conservadora, fuentes y ZIP por fecha',async()=>{
- let r=await read(receive('m1'),page('Persona Uno',job));const id=r.candidate_id;assert.ok(id);
- for(let n=2;n<=10;n++)receive('m'+n);await extraction.process(r.hash);
- assert.equal(repo.list().length,1);assert.equal(db.prepare('SELECT count(*) n FROM cv_files').get().n,1);assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,10);
- receive('m1');assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,10);
- const original=repo.versions(id)[0];assert.equal(experience.list(id).length,1);
- const s=experience.list(id)[0];experience.save(id,{id:s.id,revision:s.revision,data:{...s.data,tasks:'Corrección manual'},confirm:true},1);
- await extraction.process(r.hash);assert.equal(experience.list(id)[0].data.tasks,'Corrección manual');assert.equal(experience.list(id)[0].history.length,1);
- let updated=await read(receive('updated',{stamp:'2026-09-10T23:59:59-03:00',file:'b'}),page('Persona Uno',job.replace('2021-01-01','2022-01-01')));
- assert.equal(updated.candidate_id,id);assert.equal(repo.versions(id).length,2);assert.equal(experience.list(id).length,2);assert.ok(experience.list(id)[1].conflict);
- await read(receive('old',{stamp:'2026-09-08T12:00:00-03:00',file:'old'}),page('Persona Uno',job));assert.equal(repo.versions(id)[0].hash,updated.hash);
- receive('resend',{stamp:'2026-09-11T12:00:00-03:00',file:'a'});await extraction.process(r.hash);assert.equal(repo.versions(id)[0].hash,updated.hash);
- await read(receive('future',{stamp:'2026-09-11T14:00:00-03:00',file:'future'}),page('Persona Uno',job));
- let preview=exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'updated'});assert.equal(preview.people,1);assert.equal(preview.rows[0].hash,updated.hash);
- assert.equal(exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'new'}).people,0);
- const other=await read(receive('other-person',{chat:'222@lid',file:'b',caption:'CV de mi hermano'}),page('Persona Uno',job));assert.equal(other.candidate_id,null);assert.equal(db.prepare('SELECT count(*) n FROM cv_files').get().n,4);
- const separate=identity.createForReceipt(other,{name:{value:'Persona Dos'}});await extraction.process(other.hash);assert.notEqual(separate.candidate_id,id);
- const conflict=await read(receive('third',{file:'third'}),page('Otra Persona',job));assert.equal(conflict.candidate_id,null);
- db.prepare("UPDATE cv_receipts SET classification='other' WHERE id=?").run(conflict.id);
- preview=exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'updated'});assert.equal(preview.people,2);assert.equal(preview.files,1);
- const task=exportsService.start({start:'2026-09-09',end:'2026-09-10',mode:'updated'},1);
- while(task.state==='building')await new Promise(r=>setTimeout(r,10));assert.equal(task.state,'ready',task.error);
- const archive=await zip.loadAsync(fs.readFileSync(task.path));assert.equal(Object.keys(archive.files).filter(n=>n.endsWith('.pdf')).length,1);
- const csv=await archive.file('experiencias.csv').async('string');assert.ok(csv.includes('2022-01-01'));assert.ok(csv.includes('Reparto'));assert.equal(csv.includes('Corrección manual'),false);
- const task2=exportsService.start({start:'2026-09-09',end:'2026-09-10',mode:'updated'},1);while(task2.state==='building')await new Promise(r=>setTimeout(r,10));assert.equal(task2.state,'ready');
- assert.equal(original.incorporated,'2026-09-09T15:00:00.000Z');
-});
-test('Experiencias múltiples, categorías por tareas y períodos superpuestos',()=>{
- assert.deepEqual(categories('repartía mercadería, atendía clientes y cobraba'),['Atención al cliente','Reparto','Cobranza o manejo de dinero']);
- assert.equal(categories('Empresa Coca Cola').length,0);
- const id=repo.list()[0].id,v=repo.versions(id)[0];
- const manual={employer:'Otra empresa',role:'Operario',tasks:'Carga y descarga',start:'2020-01-01',end:'2021-01-01',categories:['Carga y descarga','Depósito y logística']};
- experience.save(id,{data:manual,version_id:v.id,confirm:true},1);
- const totals=experience.totals([{data:manual},{data:{...manual,start:'2020-06-01',end:'2021-06-01'}}],'2026-09-10');
- assert.equal(totals['Carga y descarga'].days,(Date.parse('2021-06-01')-Date.parse('2020-01-01'))/86400000);
- assert.equal(new ExperienciaLaboral({...manual,start:'2020',end:'2021'}).duration('2026-09-10'),null);
- assert.equal(dateRange('2026-09-09','2026-09-10').end,'2026-09-11T03:00:00.000Z');
- assert.equal(csvCell('=HYPERLINK("evil")').startsWith('"\''),true);assert.equal(csvCell('  +SUM(1)').startsWith('"\''),true);
-});
-test('Archivo guardado aunque falle lectura y ZIP incompleto bloqueado',async()=>{
- const r=receive('bad',{chat:'333@c.us',file:'invalid-pdf'});const previous=process.env.PYTHON_BIN;process.env.PYTHON_BIN='nonexistent-python-rrhh';
- extraction.enqueue(r.hash);while(extraction.running||extraction.queue.length)await new Promise(r=>setTimeout(r,10));if(previous)process.env.PYTHON_BIN=previous;else delete process.env.PYTHON_BIN;
- assert.equal(repo.file(r.hash).read_state,'error');assert.ok(fs.existsSync(path.join(repo.root,'cv',repo.file(r.hash).path)));
- assert.throws(()=>exportsService.start({start:'2026-09-09',end:'2026-09-10'},1),/pendientes/);
-});
-after(async()=>{await services.close();db.close();fs.rmSync(process.env.DATA_DIR,{recursive:true,force:true});});
-</file>
-
-<file path="test/sync.test.js">
-const {test,after}=require('node:test');const assert=require('assert/strict');const fs=require('fs');const os=require('os');const path=require('path');const {EventEmitter}=require('events');
-process.env.DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-sync-'));
-const {db,services}=require('../server');const {WhatsAppService,SincronizacionService}=require('../lib/whatsapp');
-services.cv.extraction=null;
-class FakeClient extends EventEmitter{initialize(){return Promise.resolve();}destroy(){return Promise.resolve();}}
-test('QR y conflicto, sincronización reanudable, LID, grupos y medio no disponible',async()=>{
- const client=new FakeClient();const wa=new WhatsAppService(services.repo,services.cv,{clientFactory:()=>client});
- await assert.rejects(wa.connect({otherIntegration:true}),/Conflicto/);await wa.connect({exclusiveAccount:true});client.emit('qr','QR-SINTETICO-DE-PRUEBA');await new Promise(r=>setTimeout(r,80));assert.ok(wa.status(true).qr?.startsWith('data:image/png'));assert.equal(wa.status(false).qr,null);await wa.disconnect();
- wa.client=client;wa.account='test';wa.state='ready';
- const sync=new SincronizacionService(services.repo,wa);wa.sync=sync;
- let fail=true;client.getChats=async()=>[{isGroup:true,id:{_serialized:'g@g.us'}},{id:{_serialized:'1@lid'}},{id:{_serialized:'status@broadcast'}}];
- const message={from:'1@lid',id:{_serialized:'m1'},timestamp:Date.parse('2026-09-09T12:00:00Z')/1000,hasMedia:true,body:'mi cv',downloadMedia:async()=>({mimetype:'application/pdf',filename:'cv.pdf',data:Buffer.from('%PDF-1.7 fake').toString('base64')})};
- client.getChatById=async()=>{if(fail)throw Error('Fallo reintentable');return {fetchMessages:async()=>[message]};};
- const started=sync.start({start:'2026-09-09',end:'2026-09-10'});while(sync.active)await new Promise(r=>setTimeout(r,10));assert.equal(sync.list()[0].state,'paused');assert.equal(sync.list()[0].cursor,0);
- fail=false;const restarted=new SincronizacionService(services.repo,wa);restarted.resume(started.id);while(restarted.active)await new Promise(r=>setTimeout(r,10));assert.equal(restarted.list()[0].state,'done');assert.equal(restarted.list()[0].cursor,1);
- let receipt=db.prepare('SELECT * FROM cv_receipts WHERE message_id=?').get('m1');assert.equal(receipt.phone,'');assert.equal(receipt.chat,'1@lid');
- await wa.enqueue(message);assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,1);
- await wa.enqueue({...message,id:{_serialized:'missing'},downloadMedia:async()=>null});assert.equal(db.prepare('SELECT state FROM cv_receipts WHERE message_id=?').get('missing').state,'error');
- await wa.enqueue({...message,from:'g@g.us',id:{_serialized:'group'}});assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,2);
- await wa.disconnect();
-});
-after(async()=>{await services.close();db.close();fs.rmSync(process.env.DATA_DIR,{recursive:true,force:true});});
-</file>
-
-<file path=".repomixignore">
-data/
-backups/
-node_modules/
-.git/
-.env*
-*.sqlite*
-*.db
-*.pem
-*.key
-*.log
-repomix-output.*
-package-lock.json
-</file>
-
-<file path="docs/transferencias-referencia.md">
-# Referencia recibida: Transferencias
-
-Se recibió y revisó `transferencias-main.zip`. El original se conserva localmente en `data/referencias/`, fuera de Git y Repomix.
-
-Componentes identificados en el código de referencia:
-
-- `whatsapp-web.js` con `Client` y `LocalAuth` en `app/index.js`.
-- Sesión persistente en `sesion_whatsapp`, navegador configurable y ejecución sin ventana.
-- Evento `qr` para vincular y evento `message` para recibir mensajes.
-- Descarga de adjuntos con reintentos y recuperación por identificador de mensaje.
-- Lectura de documentos mediante scripts Python específicos de comprobantes.
-
-La adaptación a RRHH debe crear una sesión independiente y vincular cada CV con el chat de origen. El reconocimiento de importes, bancos y comprobantes de Transferencias no corresponde a la evaluación de currículums.
-
-Esta revisión no activa la conexión de WhatsApp de RRHH ni modifica la sesión de Transferencias. La integración sigue pendiente.
-</file>
-
-<file path="iniciar.cmd">
-@echo off
-cd /d "%~dp0"
-node server.js
-pause
-</file>
-
-<file path="ocr.py">
-import sys, subprocess, tempfile, os
-import pymupdf
-
-source, binary, language = sys.argv[1:4]
-with tempfile.TemporaryDirectory(prefix='rrhh-ocr-') as folder:
-    paths = [source]
-    if source.lower().endswith('.pdf'):
-        doc = pymupdf.open(source)
-        if len(doc) > 20:
-            raise ValueError('OCR limitado a 20 páginas por CV')
-        paths = []
-        for i, page in enumerate(doc):
-            target = os.path.join(folder, f'{i}.png')
-            page.get_pixmap(matrix=pymupdf.Matrix(2,2)).save(target)
-            paths.append(target)
-    for path in paths:
-        result = subprocess.run([binary,path,'stdout','-l',language],capture_output=True,check=True)
-        sys.stdout.buffer.write(result.stdout + b'\n')
-</file>
-
-<file path="public/index.html">
-<!doctype html>
-<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>IVESS · Personas</title><link rel="stylesheet" href="/style.css?v=3"></head><body>
-<div id="login" class="login"><div class="login-card"><div class="waterline"></div><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><div class="login-eyebrow">GESTIÓN DE PERSONAS</div><h1>Tu equipo<br>empieza acá.</h1><p>Gestión de postulantes · Red interna</p><form id="loginForm"><label id="setupLabel" hidden>Clave de instalación<input name="token" autocomplete="off"><small>Disponible en data/clave-inicial.txt del servidor.</small></label><label>Usuario<input name="username" required autocomplete="username"></label><label>Contraseña<input name="password" type="password" required autocomplete="current-password"></label><button class="primary" id="loginButton">Ingresar</button><p id="loginError" role="alert"></p></form><div class="login-partner"><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."><span>Un mismo equipo.<br>Más posibilidades.</span></div></div></div>
-<div id="app" hidden><aside><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><p class="nav-title">ESPACIO DE TRABAJO</p><nav><button data-view="whatsapp" class="active">WhatsApp y sincronización</button><button data-view="candidates">Postulantes y CV</button><button data-view="downloads">Descargas por fecha</button><button data-view="settings">Configuración</button></nav><div class="aside-bottom"><span class="dot"></span> Servidor local<p id="identity"></p><button id="logout">Cerrar sesión ↗</button></div></aside>
-<main><header><div>RECURSOS HUMANOS <span>/</span> <b id="breadcrumb">Postulantes</b></div><div class="header-brand"><span class="location">Virrey del Pino · Buenos Aires</span><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."></div></header><section id="content"></section><footer>IVESS · Gestión de personas <span>Recepción de CV y datos con fuentes verificables.</span></footer></main></div>
-<dialog id="modal"><div id="modalContent"></div></dialog><div id="toast" role="status" hidden></div><script src="/reception.js?v=3" defer></script></body></html>
-</file>
-
-<file path="public/style.css">
-:root{font-family:Inter,"Segoe UI",sans-serif;color:#182d2a;background:#f4f6f4;font-synthesis:none}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d7dfda;background:white;border-radius:7px;padding:10px 15px;color:inherit}button:hover{background:#edf4ef}button:disabled{opacity:.55;cursor:wait}.primary{background:#176448;border-color:#176448;color:#fff}.primary:hover{background:#104d37}input,select,textarea{border:1px solid #d7dfda;background:white;border-radius:6px;padding:10px;width:100%;color:#263e36}textarea{min-height:95px;resize:vertical}label{display:grid;gap:7px;font-size:13px;color:#52645c}small{color:#7b8980;font-size:12px}h1{font-size:30px;letter-spacing:-1px;font-weight:650;margin:0 0 10px}h2{font-size:20px;margin:0 0 14px}h3{font-size:16px}p{line-height:1.6;color:#738079}aside{position:fixed;inset:0 auto 0 0;width:236px;background:#fff;border-right:1px solid #e1e6e1;padding:35px 22px;display:flex;flex-direction:column}.brand{font-size:43px;font-weight:850;letter-spacing:-3px;color:#17734b;line-height:1}.brand span{display:block;font-size:10px;letter-spacing:4px;margin:13px 0 0 4px;color:#6c8072;font-weight:600}.nav-title{font-size:10px;letter-spacing:1.5px;margin:55px 10px 15px}nav{display:grid;gap:9px}nav button{border:0;text-align:left;background:transparent;font-size:14px;padding:13px}nav button.active{background:#eaf2eb;color:#176448;font-weight:650}.aside-bottom{margin-top:auto;font-size:12px;color:#6b7c72}.aside-bottom p{margin:8px 0}.aside-bottom button{border:0;padding-left:0;font-size:12px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#43a66b;margin-right:6px}main{margin-left:236px}header{height:82px;padding:0 40px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid #e1e6e1;font-size:11px;letter-spacing:1px}header span{color:#a3b0a8;margin:0 14px}header b{font-weight:500;letter-spacing:0}.location{letter-spacing:0;color:#738079}#content{padding:38px 40px;min-height:calc(100vh - 140px)}.heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:25px;gap:15px}.heading p{margin:0;font-size:14px}.actions{display:flex;gap:10px;align-items:center}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:28px}.stat,.panel{background:white;border:1px solid #dfe6df;border-radius:10px}.stat{padding:22px}.stat small{font-size:12px}.stat strong{font-size:32px;display:block;margin:9px 0 4px;font-weight:600}.stat span{font-size:11px;color:#758579}.stat:first-child{border-top:3px solid #257452;padding-top:20px}.panel{padding:23px;margin-bottom:22px}.filters{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px;margin:18px 0}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px;white-space:nowrap}th{font-weight:500;color:#7b877f;font-size:11px;background:#f8faf8;padding:13px 12px;border-bottom:1px solid #e5eae5}td{padding:17px 12px;border-bottom:1px solid #edf0ec}td input{width:auto}td button{padding:6px 10px;font-size:12px}.person{display:flex;gap:11px;align-items:center}.avatar{background:#eaf1e8;color:#4f7057;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:600}.person small{display:block;margin-top:5px}.badge{padding:5px 9px;background:#f0f2eb;color:#6e7757;border-radius:20px;font-size:11px}.badge.green{background:#e8f3eb;color:#267451}.empty{text-align:center;padding:55px 20px;color:#7a8c80}.empty strong{display:block;color:#385943;font-size:18px;margin-bottom:8px}.notice{padding:15px 19px;background:#ecf2e9;border:1px solid #dce6d5;border-radius:8px;color:#60714e;font-size:12px;line-height:1.6}.muted{color:#7b8981;font-size:12px}.toolbar{display:flex;align-items:center;gap:12px;margin:15px 0}.toolbar select{width:auto}footer{padding:18px 40px;font-size:11px;color:#89958a;display:flex;justify-content:space-between;border-top:1px solid #e0e6e0}dialog{width:820px;max-width:95vw;border:0;border-radius:13px;padding:30px;color:inherit;max-height:90vh;box-shadow:0 20px 100px #1232}dialog::backdrop{background:#172e2866;backdrop-filter:blur(2px)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}.wide{grid-column:1/-1}.modal-head{display:flex;justify-content:space-between;align-items:center}.modal-head button{border:0;font-size:20px}.form-actions{display:flex;justify-content:flex-end;gap:10px;border-top:1px solid #e5eae4;padding-top:18px}.login{min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at top left,#dcebdc,transparent 70%)}.login-card{width:440px;max-width:92vw;background:white;padding:42px;border:1px solid #dae4d8;border-radius:14px}.login-card h1{font-size:26px;margin-top:40px}.login-card form{display:grid;gap:18px;margin-top:30px}#loginError{color:#ae443d;font-size:13px;margin:0}#toast{position:fixed;bottom:25px;right:25px;max-width:450px;padding:17px 24px;background:#173f30;color:white;border-radius:8px;box-shadow:0 10px 40px #0002;z-index:10}pre{white-space:pre-wrap;max-height:250px;overflow:auto;font:12px/1.6 Consolas,monospace;background:#f5f7f4;padding:14px}a{color:#196c49}.campaign{display:flex;justify-content:space-between;gap:20px;align-items:center}.campaign p{font-size:13px}.campaign strong{font-size:22px}.campaign small{display:block}details{margin-top:16px}.error{color:#ac403b}input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid #85b399;outline-offset:2px}[hidden]{display:none!important}@media(max-width:1000px){aside{width:185px;padding:28px 15px}main{margin-left:185px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:15px}header{padding:0 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}}@media(max-width:650px){aside{position:static;width:auto;padding:18px}.brand{font-size:30px}.brand span{display:none}.nav-title,.aside-bottom{display:none}nav{display:flex;margin-top:15px}nav button{font-size:12px;padding:8px}main{margin:0}header{height:50px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.actions{flex-wrap:wrap}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:15px}.toolbar{flex-wrap:wrap}footer span{display:none}dialog{padding:20px}}
-/* Identidad visual IVESS / Atilio Etchelar, tomada del separador de referencia. */
-:root{--navy:#064275;--blue:#0a67aa;--aqua:#21b4dc;--pale:#edf8fd;--line:#cfe2ec;color:#162b3b;background:#eaf5fb}
-body{min-height:100vh;background:radial-gradient(circle at 95% 5%,#21b4dc25,transparent 32rem),linear-gradient(145deg,#f8fcff,#eaf6fc 65%,#e0f1fa)}
-button{border-color:var(--line);border-radius:11px;padding:11px 16px;color:var(--blue);font-weight:600;transition:background .16s,box-shadow .16s}
-button:hover{background:#eef8fd;border-color:#8bc4dc;box-shadow:0 4px 12px #0642750b}
-.primary{background:linear-gradient(105deg,var(--navy),var(--blue) 65%,#158fbe);border-color:transparent;color:white;box-shadow:0 7px 17px #06427524}
-.primary:hover{background:linear-gradient(105deg,#07518b,#087cbe 70%,#19a0cc);border-color:transparent}
-input,select,textarea{border-color:#c6dce8;border-radius:10px;padding:11px 12px;min-width:0;color:#162b3b}
-input::placeholder{color:#6e8594}input[type=checkbox]{accent-color:var(--blue);width:17px;height:17px;cursor:pointer}
-input[type=file]{background:var(--pale);border-style:dashed;font-size:12px}input::file-selector-button{border:0;border-radius:6px;background:#d9edf8;color:var(--navy);padding:7px 10px;margin-right:12px}
-label{color:var(--navy);font-weight:600}small,p,.muted{color:#586f7e}small{font-weight:400}
-h1{font-size:clamp(26px,2.4vw,36px);line-height:1.15;letter-spacing:-1.1px;font-weight:750;color:var(--navy)}h2,h3{color:var(--navy)}
-aside{width:244px;background:linear-gradient(180deg,#fff 35%,#f1f9fd);border-color:var(--line);padding:35px 20px 24px;z-index:2}
-.brand{line-height:1;text-align:center;padding:0 12px}.brand img{display:block;width:100%;max-width:185px;height:66px;object-fit:contain;margin:auto}.brand span{font-size:9px;letter-spacing:2.1px;margin-top:13px;color:var(--blue);font-weight:750}
-.nav-title{font-size:10px;font-weight:650;letter-spacing:1.3px;margin:47px 13px 15px;color:#647f90}
-nav button{color:#547286;border-radius:12px;padding:14px}nav button.active{background:linear-gradient(105deg,var(--navy),var(--blue));color:white;box-shadow:0 7px 16px #06427525}
-.aside-bottom{color:#547286;padding:18px 12px 0;border-top:1px solid var(--line)}.aside-bottom p{color:var(--navy);font-weight:650}.aside-bottom button{background:transparent}.dot{background:#269d7a;box-shadow:0 0 0 3px #269d7a17}
-main{margin-left:244px}header{height:92px;padding:15px 38px;gap:20px;background:#ffffffbd;border-color:#d1e6f0;font-size:10px;color:var(--blue)}header b{font-weight:600;font-size:12px;color:var(--navy)}
-.header-brand{display:flex;gap:23px;align-items:center}.header-brand img{width:128px;height:51px;object-fit:contain}.location{color:#586f7e;font-size:11px}
-#content{padding:34px 38px;min-height:calc(100vh - 146px);max-width:1700px;margin:auto}.heading{gap:22px}.heading p{font-size:13px}
-#content>.heading{position:relative;padding:30px 28px 28px;background:linear-gradient(115deg,#ffffffef,#f4fbffdd);border:1px solid #c5deeb;border-radius:20px;box-shadow:0 12px 36px #0642750d;overflow:hidden}
-#content>.heading::before{content:'';position:absolute;inset:0 0 auto;height:5px;background:linear-gradient(90deg,var(--navy),var(--blue) 55%,var(--aqua))}
-.actions{flex-shrink:0;font-size:13px}.stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:25px}
-.stat,.panel{background:#ffffffed;border:1px solid var(--line);border-radius:17px;box-shadow:0 12px 36px #0642750d}
-.stat{position:relative;padding:21px 23px;overflow:hidden}.stat::after{content:'';position:absolute;right:-17px;bottom:-24px;width:90px;height:90px;border:16px solid #21b4dc09;border-radius:50%;pointer-events:none}
-.stat small{font-size:11px;text-transform:uppercase;font-weight:700;letter-spacing:.65px;color:var(--blue)}.stat strong{font-size:35px;margin:10px 0 5px;font-weight:750;color:var(--navy);line-height:1.1}.stat span{color:#586f7e}
-.stat:first-child{padding-top:21px;background:linear-gradient(120deg,#064275,#0a67aa);border:1px solid #0a67aa}.stat:first-child small{color:#d4efff}.stat:first-child strong{color:white}.stat:first-child span{color:#d1e9f7}.stat:first-child::after{border-color:#ffffff0a}
-.panel{padding:25px;overflow:hidden}.panel>.heading{margin-bottom:18px}.panel>.heading h2{margin:0}.filters{gap:11px;font-size:12px}
-.table-wrap{border:1px solid #dceaf2;border-radius:12px}th{font-weight:700;color:#416985;font-size:10px;letter-spacing:.7px;background:#edf7fc;padding:14px 12px;border-color:#d7e8f2}td{border-color:#e6f0f6}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#f5fbfe}tbody tr:has(input:checked){background:#edf8fd}td button{border-radius:8px;font-size:11px}
-.person{font-weight:600;color:var(--navy)}.avatar{background:linear-gradient(140deg,#e1f2fb,#d0eaf8);color:var(--blue);width:38px;height:38px;border-radius:12px;border:1px solid #c1e2f2}
-.badge{background:#fff4dc;color:#805a16;font-weight:600;display:inline-block}.badge.green{background:#e5f5ee;color:#237150}
-.empty{color:#586f7e;font-size:13px;background:radial-gradient(ellipse at center,#edf8fd99,transparent 70%)}.empty::before{content:'';display:block;width:32px;height:32px;border-radius:50% 50% 50% 7px;transform:rotate(45deg);background:linear-gradient(145deg,var(--blue),var(--aqua));margin:0 auto 23px;box-shadow:0 7px 20px #0a67aa22}.empty strong{color:var(--navy)}
-.notice{background:#edf8fdd9;border:1px solid #c3dfed;border-left:4px solid var(--aqua);border-radius:12px;color:#3f667c;line-height:1.7}.toolbar{font-size:12px}.toolbar #selectionCount{margin-right:auto}
-footer{font-size:10px;color:#5c7a8e;border-color:#d1e5f0;gap:20px}
-dialog{border:1px solid #c2ddea;border-top:5px solid var(--blue);border-radius:20px;box-shadow:0 25px 100px #06427538;background:linear-gradient(155deg,#fff,#f5fbfe)}dialog::backdrop{background:#082e4a66;backdrop-filter:blur(5px)}.modal-head h2{margin:0}.modal-head button{background:#eaf5fc;padding:4px 12px}.form-actions{border-color:var(--line);margin-top:15px}
-.login{padding:35px 20px;background:radial-gradient(circle at 13% 20%,#21b4dc21,transparent 28rem),radial-gradient(circle at 90% 80%,#0a67aa18,transparent 30rem)}
-.login-card{position:relative;overflow:hidden;width:470px;max-width:100%;background:#ffffffef;padding:40px 44px 28px;border:1px solid #bfdae9;border-radius:24px;box-shadow:0 20px 65px #06427520}.waterline{position:absolute;inset:0 0 auto;height:7px;background:linear-gradient(90deg,var(--navy),var(--blue) 52%,var(--aqua))}
-.login-card .brand{padding:0;display:flex;align-items:center;gap:20px;text-align:left}.login-card .brand img{width:152px;height:62px;margin:0}.login-card .brand span{font-size:9px;line-height:1.8;letter-spacing:1.8px;border-left:1px solid var(--line);padding-left:20px;margin:0;max-width:140px}
-.login-eyebrow{font-size:10px;color:var(--blue);letter-spacing:1.8px;font-weight:750;margin-top:35px}.login-card h1{font-size:38px;line-height:1.12;margin:24px 0 12px}.login-card>p{font-size:13px}.login-card form .primary{min-height:47px}.login-partner{display:flex;align-items:center;justify-content:space-between;gap:20px;border-top:1px solid var(--line);padding-top:22px;margin-top:24px}.login-partner img{width:125px;height:50px;object-fit:contain}.login-partner span{font-size:11px;color:#586f7e;line-height:1.6}
-#toast{background:var(--navy);border:1px solid #2773a2;border-radius:13px;box-shadow:0 10px 40px #06427530;max-width:min(450px,calc(100vw - 32px));font-size:13px}pre{background:#edf6fb;border-radius:10px}a{color:var(--blue)}.campaign strong{font-size:28px;color:var(--navy)}summary{cursor:pointer;color:var(--navy)}hr{border:0;border-top:1px solid var(--line);margin:24px 0}
-input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--aqua);outline-offset:2px;box-shadow:0 0 0 4px #21b4dc15}
-@media(min-width:1200px) and (max-width:1450px){#content>.heading{align-items:flex-start;flex-direction:column}.actions{align-self:flex-end}}
-@media(max-width:1199px){aside{width:210px;padding:28px 16px}.brand img{height:57px}main{margin-left:210px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:18px}.stat small{font-size:10px}header{padding:15px 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}.panel>.heading{gap:8px}.actions{flex-wrap:wrap}#content>.heading{padding:26px}}
-@media(max-width:760px){aside{position:static;width:auto;padding:15px 18px;background:#ffffffeb}.brand{display:flex;align-items:center;gap:15px;padding:0}.brand img{width:105px;height:40px;margin:0}.brand span{display:block;margin:0;font-size:8px;letter-spacing:1.6px}.nav-title{display:none}.aside-bottom{display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px 0 0;font-size:10px}.aside-bottom p{margin:0}.aside-bottom button{margin-left:auto;padding:0;font-size:10px}nav{display:flex;margin-top:16px;gap:6px}nav button{font-size:11px;padding:10px;flex:1;text-align:center;border-radius:9px}main{margin:0}header{height:60px;padding:10px 18px;font-size:9px}.header-brand img{width:91px;height:36px}header b{font-size:10px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.stat{padding:18px}.stat strong{font-size:30px}.stat span{font-size:10px}#content>.heading{padding:24px 19px;gap:20px;border-radius:17px}h1{font-size:28px}.heading p{font-size:12px;line-height:1.7}.actions{width:100%;gap:8px}.actions button{flex:1;padding:11px 9px;font-size:11px}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:17px;border-radius:15px}.filters{gap:9px}.filters input,.filters select{padding:11px 9px;font-size:11px}.toolbar{flex-wrap:wrap;gap:8px}.toolbar button{padding:9px 10px;font-size:11px}.toolbar #selectionCount{width:100%;margin-bottom:4px}.campaign{flex-wrap:wrap}.campaign>div:first-child{width:100%}footer{padding:18px}footer span{display:none}dialog{padding:22px 18px;border-radius:17px}.notice{padding:13px 15px;font-size:11px}.login-card{padding:32px 27px 25px}.login-card h1{font-size:34px}.login-card .brand img{width:135px}.login-card .brand span{padding-left:15px}.login-partner span{font-size:10px}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
-.block{display:block;margin-top:5px}.qr{width:260px;height:260px;max-width:100%;object-fit:contain}.checkline{display:flex;align-items:center;gap:10px;line-height:1.6;margin:16px 0}.checkline input{width:auto;flex-shrink:0}fieldset{border:1px solid var(--line);border-radius:12px;padding:15px}.employment{border:1px solid var(--line);border-radius:12px;padding:18px;margin:18px 0}.employment p{white-space:pre-wrap}.download-link{display:inline-block;padding:12px 20px;background:var(--blue);color:white;border-radius:10px}#peopleRows{margin-top:20px}@media(max-width:760px){nav{flex-wrap:wrap}nav button{flex:1 1 40%}.employment{padding:12px}.qr{width:220px;height:220px}}
-</file>
-
-<file path="scripts/browser-check.js">
-const {chromium}=require('@playwright/test');
-const fs=require('fs');const os=require('os');const path=require('path');const assert=require('assert/strict');
-const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-ui-'));process.env.DATA_DIR=dir;
-const {app,db}=require('../server');
-(async()=>{const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const browser=await chromium.launch({channel:'msedge',headless:true});try{const page=await browser.newPage({viewport:{width:1440,height:960}});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}`);await page.getByLabel('Clave de instalación').fill(fs.readFileSync(path.join(dir,'clave-inicial.txt'),'utf8'));await page.getByLabel('Usuario',{exact:true}).fill('admin');await page.getByLabel('Contraseña',{exact:true}).fill('prueba-ui-segura-123');await page.getByRole('button',{name:'Crear administrador'}).click();await page.getByRole('button',{name:'Nuevo postulante'}).click();await page.getByLabel('Nombre y apellido').fill('Postulante de prueba');await page.getByLabel('WhatsApp del chat').fill('1155550000');await page.getByLabel('Teléfono indicado en el CV').fill('1166660000');assert.equal(await page.locator('#phoneWarning').isVisible(),true);await page.getByRole('button',{name:'Guardar ficha'}).click();await page.getByRole('button',{name:'Ver ficha'}).waitFor();await page.getByRole('button',{name:'Convocatorias',exact:false}).first().click();await page.getByRole('button',{name:'Nueva convocatoria'}).click();await page.getByLabel('Título',{exact:true}).fill('Entrevistas de prueba');await page.getByLabel('Fecha',{exact:true}).fill('2026-09-16');await page.getByLabel('Horario de inicio').fill('09:00');await page.getByRole('button',{name:'Crear convocatoria'}).click();await page.getByRole('button',{name:'Ver convocatoria'}).waitFor();await page.getByRole('button',{name:'Postulantes',exact:false}).first().click();await page.getByRole('checkbox').check();await page.getByRole('button',{name:'Agregar a convocatoria'}).click();await page.getByRole('button',{name:'Agregar selección'}).click();await page.locator('dialog').waitFor({state:'hidden'});await page.screenshot({path:path.join(__dirname,'..','data','panel-verificado.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);assert.deepEqual(errors,[]);console.log('Prueba visual OK: instalación, login, ficha, aviso de teléfonos, convocatoria y selección; escritorio y móvil.');}finally{await browser.close();await new Promise(r=>server.close(r));db.close();fs.rmSync(dir,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
 </file>
 
 <file path="scripts/excel-import.js">
@@ -1131,6 +988,195 @@ test('Evaluación con fila 8, fórmulas, fechas UTC y categorías agrupadas sin 
 });
 </file>
 
+<file path="test/reception.test.js">
+const {test,after}=require('node:test');const assert=require('node:assert/strict');const fs=require('fs');const os=require('os');const path=require('path');
+process.env.DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-reception-'));
+const {db,services}=require('../server');const {repo,cv,extraction,identity,experience,exports:exportsService}=services;cv.extraction=null;
+const {categories,ExperienciaLaboral}=require('../lib/experience');const {dateRange}=require('../lib/whatsapp');const {csvCell}=require('../lib/export');
+const zip=require('jszip');
+const bytes=n=>Buffer.from('%PDF-1.7\nfixture '+n);
+const page=(name,job='')=>[{page:1,text:`Nombre: ${name}\nDNI: 12345678\nExperiencia laboral:\n${job}\n\nEducación\nSecundario`,method:'fixture'}];
+const job='Empresa: Ejemplo\nPuesto: Repartidor\nTareas: repartía mercadería, atendía clientes y cobraba\n2020-01-01 a 2021-01-01';
+function receive(n,{chat='111@c.us',stamp='2026-09-09T12:00:00-03:00',file='a',candidate,caption='Mi CV'}={}){return cv.receive({account:'test',chat,message_id:n,received:stamp,original:'CV.pdf',caption,candidate_id:candidate,isCV:true},bytes(file)).receipt;}
+async function read(r,pages){db.prepare("UPDATE cv_files SET read_state='done',pages=?,extracted=? WHERE hash=?").run(JSON.stringify(pages),JSON.stringify(require('../lib/cv').extractFields(pages)),r.hash);await extraction.process(r.hash);return db.prepare('SELECT * FROM cv_receipts WHERE id=?').get(r.id);}
+test('Recepciones, versiones cronológicas, identidad conservadora, fuentes y ZIP por fecha',async()=>{
+ let r=await read(receive('m1'),page('Persona Uno',job));const id=r.candidate_id;assert.ok(id);
+ for(let n=2;n<=10;n++)receive('m'+n);await extraction.process(r.hash);
+ assert.equal(repo.list().length,1);assert.equal(db.prepare('SELECT count(*) n FROM cv_files').get().n,1);assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,10);
+ receive('m1');assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,10);
+ const original=repo.versions(id)[0];assert.equal(experience.list(id).length,1);
+ const s=experience.list(id)[0];experience.save(id,{id:s.id,revision:s.revision,data:{...s.data,tasks:'Corrección manual'},confirm:true},1);
+ await extraction.process(r.hash);assert.equal(experience.list(id)[0].data.tasks,'Corrección manual');assert.equal(experience.list(id)[0].history.length,1);
+ let updated=await read(receive('updated',{stamp:'2026-09-10T23:59:59-03:00',file:'b'}),page('Persona Uno',job.replace('2021-01-01','2022-01-01')));
+ assert.equal(updated.candidate_id,id);assert.equal(repo.versions(id).length,2);assert.equal(experience.list(id).length,2);assert.ok(experience.list(id)[1].conflict);
+ await read(receive('old',{stamp:'2026-09-08T12:00:00-03:00',file:'old'}),page('Persona Uno',job));assert.equal(repo.versions(id)[0].hash,updated.hash);
+ receive('resend',{stamp:'2026-09-11T12:00:00-03:00',file:'a'});await extraction.process(r.hash);assert.equal(repo.versions(id)[0].hash,updated.hash);
+ await read(receive('future',{stamp:'2026-09-11T14:00:00-03:00',file:'future'}),page('Persona Uno',job));
+ let preview=exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'updated'});assert.equal(preview.people,1);assert.equal(preview.rows[0].hash,updated.hash);
+ assert.equal(exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'new'}).people,0);
+ const other=await read(receive('other-person',{chat:'222@lid',file:'b',caption:'CV de mi hermano'}),page('Persona Uno',job));assert.equal(other.candidate_id,null);assert.equal(db.prepare('SELECT count(*) n FROM cv_files').get().n,4);
+ const separate=identity.createForReceipt(other,{name:{value:'Persona Dos'}});await extraction.process(other.hash);assert.notEqual(separate.candidate_id,id);
+ const conflict=await read(receive('third',{file:'third'}),page('Otra Persona',job));assert.equal(conflict.candidate_id,null);
+ db.prepare("UPDATE cv_receipts SET classification='other' WHERE id=?").run(conflict.id);
+ preview=exportsService.preview({start:'2026-09-09',end:'2026-09-10',mode:'updated'});assert.equal(preview.people,2);assert.equal(preview.files,1);
+ const task=exportsService.start({start:'2026-09-09',end:'2026-09-10',mode:'updated'},1);
+ while(task.state==='building')await new Promise(r=>setTimeout(r,10));assert.equal(task.state,'ready',task.error);
+ const archive=await zip.loadAsync(fs.readFileSync(task.path));assert.equal(Object.keys(archive.files).filter(n=>n.endsWith('.pdf')).length,1);
+ const csv=await archive.file('experiencias.csv').async('string');assert.ok(csv.includes('2022-01-01'));assert.ok(csv.includes('Reparto'));assert.equal(csv.includes('Corrección manual'),false);
+ const task2=exportsService.start({start:'2026-09-09',end:'2026-09-10',mode:'updated'},1);while(task2.state==='building')await new Promise(r=>setTimeout(r,10));assert.equal(task2.state,'ready');
+ assert.equal(original.incorporated,'2026-09-09T15:00:00.000Z');
+});
+test('Experiencias múltiples, categorías por tareas y períodos superpuestos',()=>{
+ assert.deepEqual(categories('repartía mercadería, atendía clientes y cobraba'),['Atención al cliente','Reparto','Cobranza o manejo de dinero']);
+ assert.equal(categories('Empresa Coca Cola').length,0);
+ const id=repo.list()[0].id,v=repo.versions(id)[0];
+ const manual={employer:'Otra empresa',role:'Operario',tasks:'Carga y descarga',start:'2020-01-01',end:'2021-01-01',categories:['Carga y descarga','Depósito y logística']};
+ experience.save(id,{data:manual,version_id:v.id,confirm:true},1);
+ const totals=experience.totals([{data:manual},{data:{...manual,start:'2020-06-01',end:'2021-06-01'}}],'2026-09-10');
+ assert.equal(totals['Carga y descarga'].days,(Date.parse('2021-06-01')-Date.parse('2020-01-01'))/86400000);
+ assert.equal(new ExperienciaLaboral({...manual,start:'2020',end:'2021'}).duration('2026-09-10'),null);
+ assert.equal(dateRange('2026-09-09','2026-09-10').end,'2026-09-11T03:00:00.000Z');
+ assert.equal(csvCell('=HYPERLINK("evil")').startsWith('"\''),true);assert.equal(csvCell('  +SUM(1)').startsWith('"\''),true);
+});
+test('Archivo guardado aunque falle lectura y ZIP incompleto bloqueado',async()=>{
+ const r=receive('bad',{chat:'333@c.us',file:'invalid-pdf'});const previous=process.env.PYTHON_BIN;process.env.PYTHON_BIN='nonexistent-python-rrhh';
+ extraction.enqueue(r.hash);while(extraction.running||extraction.queue.length)await new Promise(r=>setTimeout(r,10));if(previous)process.env.PYTHON_BIN=previous;else delete process.env.PYTHON_BIN;
+ assert.equal(repo.file(r.hash).read_state,'error');assert.ok(fs.existsSync(path.join(repo.root,'cv',repo.file(r.hash).path)));
+ assert.throws(()=>exportsService.start({start:'2026-09-09',end:'2026-09-10'},1),/pendientes/);
+});
+after(async()=>{await services.close();db.close();fs.rmSync(process.env.DATA_DIR,{recursive:true,force:true});});
+</file>
+
+<file path="test/sync.test.js">
+const {test,after}=require('node:test');const assert=require('assert/strict');const fs=require('fs');const os=require('os');const path=require('path');const {EventEmitter}=require('events');
+process.env.DATA_DIR=fs.mkdtempSync(path.join(os.tmpdir(),'rrhh-sync-'));
+const {db,services}=require('../server');const {WhatsAppService,SincronizacionService}=require('../lib/whatsapp');
+services.cv.extraction=null;
+class FakeClient extends EventEmitter{initialize(){return Promise.resolve();}destroy(){return Promise.resolve();}}
+test('QR y conflicto, sincronización reanudable, LID, grupos y medio no disponible',async()=>{
+ const client=new FakeClient();const wa=new WhatsAppService(services.repo,services.cv,{clientFactory:()=>client});
+ await assert.rejects(wa.connect({otherIntegration:true}),/Conflicto/);await wa.connect({exclusiveAccount:true});client.emit('qr','QR-SINTETICO-DE-PRUEBA');await new Promise(r=>setTimeout(r,80));assert.ok(wa.status(true).qr?.startsWith('data:image/png'));assert.equal(wa.status(false).qr,null);await wa.disconnect();
+ wa.client=client;wa.account='test';wa.state='ready';
+ const sync=new SincronizacionService(services.repo,wa);wa.sync=sync;
+ let fail=true;client.getChats=async()=>[{isGroup:true,id:{_serialized:'g@g.us'}},{id:{_serialized:'1@lid'}},{id:{_serialized:'status@broadcast'}}];
+ const message={from:'1@lid',id:{_serialized:'m1'},timestamp:Date.parse('2026-09-09T12:00:00Z')/1000,hasMedia:true,body:'mi cv',downloadMedia:async()=>({mimetype:'application/pdf',filename:'cv.pdf',data:Buffer.from('%PDF-1.7 fake').toString('base64')})};
+ client.getChatById=async()=>{if(fail)throw Error('Fallo reintentable');return {fetchMessages:async()=>[message]};};
+ const started=sync.start({start:'2026-09-09',end:'2026-09-10'});while(sync.active)await new Promise(r=>setTimeout(r,10));assert.equal(sync.list()[0].state,'paused');assert.equal(sync.list()[0].cursor,0);
+ fail=false;const restarted=new SincronizacionService(services.repo,wa);restarted.resume(started.id);while(restarted.active)await new Promise(r=>setTimeout(r,10));assert.equal(restarted.list()[0].state,'done');assert.equal(restarted.list()[0].cursor,1);
+ let receipt=db.prepare('SELECT * FROM cv_receipts WHERE message_id=?').get('m1');assert.equal(receipt.phone,'');assert.equal(receipt.chat,'1@lid');
+ await wa.enqueue(message);assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,1);
+ await wa.enqueue({...message,id:{_serialized:'missing'},downloadMedia:async()=>null});assert.equal(db.prepare('SELECT state FROM cv_receipts WHERE message_id=?').get('missing').state,'error');
+ await wa.enqueue({...message,from:'g@g.us',id:{_serialized:'group'}});assert.equal(db.prepare('SELECT count(*) n FROM cv_receipts').get().n,2);
+ await wa.disconnect();
+});
+after(async()=>{await services.close();db.close();fs.rmSync(process.env.DATA_DIR,{recursive:true,force:true});});
+</file>
+
+<file path=".gitignore">
+node_modules/
+data/
+backups/
+*.log
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.db
+*.pem
+*.key
+__pycache__/
+</file>
+
+<file path="public/app.js">
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let people=[],campaigns=[],me,view='candidates',selected=new Set(),needsSetup=false;
+async function api(url,options={}){const r=await fetch('/api'+url,{...options,headers:options.body instanceof FormData?{}:{'Content-Type':'application/json'},body:options.body instanceof FormData?options.body:options.body?JSON.stringify(options.body):undefined});const data=await r.json();if(!r.ok){if(r.status===401&&url!=='/login'){showLogin();}throw Error(data.error||'No se pudo completar la operación');}return data;}
+function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').hidden=true,6500);}
+function bind(selector,event,fn){$(selector)?.addEventListener(event,async e=>{try{await fn(e);}catch(err){toast(err.message);}});}
+function modal(html){$('#modalContent').innerHTML=html;$('#modal').showModal();bind('#closeModal','click',()=>$('#modal').close());}
+const modalHead=title=>`<div class="modal-head"><h2>${esc(title)}</h2><button type="button" id="closeModal" aria-label="Cerrar">×</button></div>`;
+const options=(items,current)=>items.map(x=>`<option ${x===current?'selected':''}>${esc(x)}</option>`).join('');
+async function showLogin(){needsSetup=(await api('/auth')).needsSetup;$('#app').hidden=true;$('#login').hidden=false;$('#setupLabel').hidden=!needsSetup;$('#loginButton').textContent=needsSetup?'Crear administrador':'Ingresar';}
+bind('#loginForm','submit',async e=>{e.preventDefault();$('#loginError').textContent='';const body=Object.fromEntries(new FormData(e.target));try{if(needsSetup)await api('/setup',{method:'POST',body});await api('/login',{method:'POST',body});e.target.reset();await boot();}catch(err){$('#loginError').textContent=err.message;}});
+bind('#logout','click',async()=>{await api('/logout',{method:'POST'});$('#modal').close();await showLogin();});
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;render();}));
+async function refresh(){[people,campaigns]=await Promise.all([api('/candidates'),api('/campaigns')]);}
+async function boot(){me=await api('/me');await refresh();$('#identity').textContent=me.username;$('#login').hidden=true;$('#app').hidden=false;render();}
+function render(){document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('#breadcrumb').textContent={candidates:'Postulantes',campaigns:'Convocatorias',settings:'Configuración'}[view];({candidates:renderPeople,campaigns:renderCampaigns,settings:renderSettings}[view])();}
+function renderPeople(){const confirmed=campaigns.reduce((n,c)=>n+c.invitations.filter(i=>i.status==='Confirmó').length,0);$('#content').innerHTML=`<div class="heading"><div><h1>Encontrá tu próximo equipo.</h1><p>Todos los postulantes, un solo lugar para dar el siguiente paso.</p></div><div class="actions"><button id="import">↑ &nbsp; Importar Excel</button><button class="primary" id="new">+ &nbsp; Nuevo postulante</button></div></div><div class="stats">${[['Postulantes',people.length,'Fichas en tu base'],['Por revisar',people.filter(p=>p.status==='Pendiente').length,'Pendientes de evaluación'],['Preseleccionados',people.filter(p=>p.status==='Preseleccionado').length,'Revisados por el equipo'],['Confirmaciones',confirmed,'En todas las convocatorias']].map(([a,b,c])=>`<div class="stat"><small>${a}</small><strong>${b}</strong><span>${c}</span></div>`).join('')}</div><div class="panel"><div class="heading"><h2>Base de postulantes</h2><span class="muted">Selección con revisión humana</span></div><div class="filters"><input id="search" placeholder="Buscar nombre, teléfono o localidad" aria-label="Buscar postulantes"><select id="statusFilter" aria-label="Estado">${options(['Todos los estados','Pendiente','Revisado','Preseleccionado','Archivado'])}</select><select id="licenseFilter" aria-label="Licencia">${options(['Todas las licencias','B1','B2','C1','C2','C3','E1','Sin dato'])}</select><input id="radius" type="number" min="0" placeholder="Radio máximo (km)" aria-label="Radio máximo en kilómetros"></div><div class="toolbar"><span id="selectionCount" class="muted"></span><button id="addToCampaign">Agregar a convocatoria</button><button id="reload">↻ Actualizar</button></div><div class="table-wrap"><table><thead><tr><th></th><th>POSTULANTE</th><th>LOCALIDAD</th><th>LICENCIA</th><th>DISTANCIA</th><th>ESTADO</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div id="empty" class="empty" hidden></div></div><div class="notice">Ubicación de referencia: Juan Manuel de Rosas 21028, Virrey del Pino. Radio inicial sugerido: 15 km, pendiente de validar. Las distancias se cargan manualmente; si faltan, el postulante permanece visible para revisión.</div>`;bind('#new','click',()=>editPerson());bind('#import','click',importExcel);bind('#reload','click',async()=>{await refresh();render();});bind('#addToCampaign','click',addToCampaign);['#search','#statusFilter','#licenseFilter','#radius'].forEach(s=>bind(s,'input',drawRows));drawRows();}
+function drawRows(){const term=$('#search').value.toLowerCase();const status=$('#statusFilter').value;const license=$('#licenseFilter').value;const radius=$('#radius').value;const rows=people.filter(p=>[p.name,p.phone,p.cvPhone,p.locality].join(' ').toLowerCase().includes(term)&&(status==='Todos los estados'||p.status===status)&&(license==='Todas las licencias'||(license==='Sin dato'?!p.license:p.license.toUpperCase().split(/[\s,;/]+/).includes(license)))&&(!radius||p.distance==null||p.distance<=Number(radius)));$('#rows').innerHTML=rows.map(p=>`<tr><td><input type="checkbox" aria-label="Seleccionar ${esc(p.name)}" data-select="${p.id}" ${selected.has(p.id)?'checked':''}></td><td><div class="person"><span class="avatar">${esc(p.name.split(' ').map(s=>s[0]).slice(0,2).join('').toUpperCase())}</span><div>${esc(p.name)}<small>${esc(p.phone||(p.cvPhone?'CV: '+p.cvPhone:'WhatsApp por confirmar'))}</small></div></div></td><td>${esc(p.locality||'Por confirmar')}</td><td>${esc(p.license||'Sin dato')}</td><td>${p.distance==null?'Por confirmar':esc(p.distance)+' km'}</td><td><span class="badge ${p.status==='Preseleccionado'?'green':''}">${esc(p.status)}</span></td><td><button data-edit="${p.id}">Ver ficha ↗</button></td></tr>`).join('');$('#empty').hidden=!!rows.length;$('#empty').innerHTML=people.length?'<strong>No hay coincidencias</strong>Probá con otros filtros.':'<strong>Un nuevo equipo empieza con una ficha</strong>Cargá el primer postulante o importá un Excel para empezar.';document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>editPerson(Number(b.dataset.edit)).catch(e=>toast(e.message)));document.querySelectorAll('[data-select]').forEach(b=>b.onchange=()=>{const id=Number(b.dataset.select);b.checked?selected.add(id):selected.delete(id);selectionCount();});selectionCount();}
+function selectionCount(){$('#selectionCount').textContent=`${selected.size} seleccionados`;}
+async function editPerson(id){const p=id?await api('/candidates').then(rows=>rows.find(r=>r.id===id)):{};if(!p)throw Error('Ficha no encontrada');const input=(key,label,type='text')=>`<label>${label}<input name="${key}" type="${type}" ${key==='name'?'required':''} ${type==='number'?'min="0" step="0.1"':''} value="${esc(p[key])}"></label>`;modal(`${modalHead(id?'Ficha del postulante':'Nuevo postulante')}<form id="personForm"><div class="form-grid">${input('name','Nombre y apellido')}${input('phone','WhatsApp del chat')}${input('cvPhone','Teléfono indicado en el CV')}${input('locality','Localidad')}${input('address','Domicilio declarado')}${input('distance','Distancia verificada (km)','number')}${input('license','Licencia declarada (ej.: B1, C1)')}${input('licenseExpiry','Vencimiento de licencia','date')}<label>Mayoría de edad declarada<select name="adult">${options(['Por confirmar','Sí','No'],p.adult)}</select></label><label>Estado de revisión<select name="status">${options(['Pendiente','Revisado','Preseleccionado','Archivado'],p.status)}</select></label>${input('availability','Disponibilidad y traslado')}${input('source','Origen del dato')}<label class="wide">Experiencia<textarea name="experience">${esc(p.experience)}</textarea></label><label class="wide">Notas y evidencias<textarea name="notes">${esc(p.notes)}</textarea></label></div><div id="phoneWarning" class="notice" hidden>El WhatsApp del chat difiere del teléfono del CV. Verificá a quién corresponde antes de contactar.</div><div class="form-actions"><button class="primary">Guardar ficha</button></div></form>${id?'<hr><h3>Currículums y lectura</h3><p class="muted">PDF, JPG o PNG · máximo 15 MB. Los datos extraídos deben verificarse y copiarse a la ficha.</p><form id="uploadForm" class="toolbar"><input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required><button>Cargar y leer CV</button></form><div id="documents"></div>':'<p class="muted">Guardá la ficha para adjuntar el CV.</p>'}`);const warning=()=>{const f=$('#personForm');const a=f.elements.phone.value.replace(/\D/g,'');const b=f.elements.cvPhone.value.replace(/\D/g,'');$('#phoneWarning').hidden=!(a&&b&&a!==b);};bind('#personForm','input',warning);warning();bind('#personForm','submit',async e=>{e.preventDefault();const body={...Object.fromEntries(new FormData(e.target)),version:p.version};await api(id?'/candidates/'+id:'/candidates',{method:id?'PUT':'POST',body});$('#modal').close();await refresh();render();toast('Ficha guardada');});if(id){await documents(id);bind('#uploadForm','submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await api(`/candidates/${id}/documents`,{method:'POST',body:new FormData(e.target)});e.target.reset();await documents(id);toast('CV guardado. La lectura se procesa en el servidor.');}finally{b.disabled=false;}});}}
+async function documents(id){const docs=await api(`/candidates/${id}/documents`);$('#documents').innerHTML=docs.map(d=>`<details><summary>${esc(d.original)} · ${esc(d.status)}</summary><p><a href="/api/documents/${d.id}">Descargar original</a></p><pre>${esc(d.text||'Sin texto disponible todavía. Actualizá la lectura en unos instantes.')}</pre></details>`).join('')+'<button type="button" id="refreshDocs">Actualizar lectura</button>';bind('#refreshDocs','click',()=>documents(id));}
+function importExcel(){modal(`${modalHead('Importar postulantes desde Excel')}<p>Se detecta la hoja EVALUACION o la primera hoja y sus encabezados. Los datos adicionales se conservan en notas. Revisá la vista previa antes de incorporar las fichas.</p><form id="excelForm" class="toolbar"><input type="file" name="file" accept=".xlsx" required><button class="primary">Leer archivo</button></form><div id="preview"></div>`);bind('#excelForm','submit',async e=>{e.preventDefault();const result=await api('/import/preview',{method:'POST',body:new FormData(e.target)});const good=result.rows.filter(r=>r.name);$('#preview').innerHTML=`<p>${esc(result.sheet)} · Encabezados en fila ${result.headerRow} · ${good.length} filas con nombre / ${result.rows.length} filas totales.</p><p class="muted">Columnas conservadas en notas: ${esc(result.headers.filter(h=>!h.field).map(h=>h.label).join(', ')||'Ninguna')}. Los resultados del Excel quedan como antecedentes; todas las fichas se importan pendientes de revisión.</p><div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Contacto</th><th>Localidad</th><th>Licencia</th></tr></thead><tbody>${good.slice(0,100).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.phone||r.cvPhone)}</td><td>${esc(r.locality)}</td><td>${esc(r.license)}</td></tr>`).join('')}</tbody></table></div><p class="muted">Vista previa de hasta 100 filas. Duplicados exactos por nombre y ambos teléfonos se omiten. Las filas sin nombre no se importan.</p><button id="commitImport" class="primary" ${good.length?'':'disabled'}>Importar ${good.length} fichas</button>`;bind('#commitImport','click',async e=>{e.target.disabled=true;try{const r=await api('/import/commit',{method:'POST',body:{rows:good}});$('#modal').close();await refresh();render();toast(`${r.added} fichas importadas; ${r.skipped} duplicadas omitidas`);}finally{e.target.disabled=false;}});});}
+function renderCampaigns(){$('#content').innerHTML=`<div class="heading"><div><h1>Conversaciones que abren puertas.</h1><p>Organizá entrevistas y registrá cada respuesta.</p></div><button id="newCampaign" class="primary">+ Nueva convocatoria</button></div>${campaigns.length?campaigns.map(c=>`<div class="panel"><div class="campaign"><div><h2>${esc(c.title)}</h2><p>${esc(c.date)} · ${esc(c.time)} hs · Cupo: ${c.capacity}</p><button data-campaign="${c.id}">Ver convocatoria ↗</button></div><div><strong>${c.invitations.length} / ${c.capacity}</strong><small>seleccionados</small></div><div><strong>${c.invitations.filter(i=>i.status==='Confirmó').length}</strong><small>confirmados</small></div></div></div>`).join(''):'<div class="panel empty"><strong>Prepará tu primera convocatoria</strong>Definí fecha, hora y cupo; luego agregá personas desde Postulantes.</div>'}<div class="notice">Las invitaciones se preparan para copiar. El envío y la confirmación se registran manualmente en esta etapa.</div>`;bind('#newCampaign','click',newCampaign);document.querySelectorAll('[data-campaign]').forEach(b=>b.onclick=()=>campaignDetail(Number(b.dataset.campaign)));}
+function newCampaign(){modal(`${modalHead('Nueva convocatoria')}<form id="campaignForm"><div class="form-grid"><label class="wide">Título<input name="title" required placeholder="Entrevistas · Reparto y distribución"></label><label>Fecha<input name="date" type="date" required></label><label>Horario de inicio<input name="time" type="time" required></label><label>Cupo de postulantes<input name="capacity" type="number" min="1" max="1000" value="40" required></label></div><div class="form-actions"><button class="primary">Crear convocatoria</button></div></form>`);bind('#campaignForm','submit',async e=>{e.preventDefault();await api('/campaigns',{method:'POST',body:Object.fromEntries(new FormData(e.target))});$('#modal').close();await refresh();render();});}
+function addToCampaign(){if(!selected.size)return toast('Seleccioná al menos un postulante');if(!campaigns.length){view='campaigns';render();return newCampaign();}modal(`${modalHead('Agregar a una convocatoria')}<p>${selected.size} postulantes seleccionados, incluidos los que no se ven por los filtros.</p><form id="assignForm"><label>Convocatoria<select name="campaign">${campaigns.map(c=>`<option value="${c.id}">${esc(c.title)} · ${c.invitations.length}/${c.capacity}</option>`).join('')}</select></label><p class="muted">Agregar personas no envía mensajes.</p><button class="primary">Agregar selección</button></form>`);bind('#assignForm','submit',async e=>{e.preventDefault();await api(`/campaigns/${e.target.elements.campaign.value}/invitations`,{method:'POST',body:{ids:[...selected]}});selected.clear();$('#modal').close();await refresh();render();toast('Selección agregada a la convocatoria');});}
+function campaignDetail(id){const c=campaigns.find(c=>c.id===id);modal(`${modalHead(c.title)}<p>${esc(c.date)} · ${esc(c.time)} hs · ${c.invitations.length}/${c.capacity} seleccionados · ${c.invitations.filter(i=>i.status==='Confirmó').length} confirmados</p><div class="table-wrap"><table><thead><tr><th>Postulante</th><th>Respuesta / asistencia</th><th>Invitación</th></tr></thead><tbody>${c.invitations.map(i=>`<tr><td>${esc(i.name)}<br><small>${esc(i.phone||'Sin teléfono')}</small></td><td><select aria-label="Estado de ${esc(i.name)}" data-invite="${i.candidate_id}">${options(['Seleccionado','Invitado','Confirmó','No puede asistir','Sin respuesta','Asistió','No asistió'],i.status)}</select></td><td><button data-message="${i.candidate_id}">Preparar texto</button></td></tr>`).join('')}</tbody></table></div><div id="messageArea"></div>`);document.querySelectorAll('[data-invite]').forEach(s=>s.onchange=async()=>{try{await api(`/campaigns/${id}/invitations/${s.dataset.invite}`,{method:'PUT',body:{status:s.value}});await refresh();render();toast('Estado actualizado');}catch(e){toast(e.message);s.value=c.invitations.find(i=>i.candidate_id===Number(s.dataset.invite)).status;}});document.querySelectorAll('[data-message]').forEach(b=>b.onclick=()=>{const i=c.invitations.find(i=>i.candidate_id===Number(b.dataset.message));$('#messageArea').innerHTML=`<h3>Invitación para revisar y copiar</h3><textarea id="messageText" rows="6">${esc(`Hola ${i.name}, te contactamos de IVESS por tu postulación. Queremos invitarte a una entrevista el ${c.date} a las ${c.time} hs en Juan Manuel de Rosas 21028, Virrey del Pino. ¿Podés confirmar tu asistencia? ¡Gracias!`)}</textarea><p class="muted">Verificá el destinatario y el horario. Copiar el texto no envía el mensaje ni cambia el estado.</p><button id="copyMessage">Seleccionar texto para copiar</button>`;$('#copyMessage').onclick=()=>{$('#messageText').select();toast('Texto seleccionado. Usá Ctrl+C para copiar.');};});}
+function renderSettings(){$('#content').innerHTML=`<div class="heading"><div><h1>Tu espacio de trabajo.</h1><p>Administración del servidor y conexiones.</p></div></div><div class="panel"><h2>WhatsApp</h2><span class="badge">Pendiente de integración</span><p>Cuenta prevista: +54 9 11 5147-5803. La sesión propia de RR. HH. se conectará al incorporar el proyecto Transferencias de referencia.</p><small>Esta versión no vincula, importa conversaciones ni envía mensajes.</small></div><div class="panel"><h2>Lectura y evaluación</h2><p>PDF con texto: extracción directa. PDF escaneado e imágenes: OCR local. El texto original queda junto al archivo para verificar los datos.</p><p class="muted">No se calculan distancias por localidad ni se descartan personas automáticamente por edad. La licencia, disponibilidad, experiencia y traslado se revisan en cada ficha.</p></div>${me.role==='admin'?'<div class="panel"><h2>Nuevo usuario</h2><form id="userForm" class="form-grid"><label>Usuario<input name="username" required autocomplete="off"></label><label>Contraseña (mínimo 12 caracteres)<input name="password" type="password" minlength="12" required autocomplete="new-password"></label><div><button class="primary">Crear usuario</button></div></form></div><div class="panel"><h2>Copias de seguridad</h2><p>Guarda una copia de la base central y los CV en la carpeta backups del servidor.</p><button id="backup">Crear copia ahora</button><p id="backupResult" class="muted"></p></div>':''}`;bind('#userForm','submit',async e=>{e.preventDefault();await api('/users',{method:'POST',body:Object.fromEntries(new FormData(e.target))});e.target.reset();toast('Usuario creado');});bind('#backup','click',async e=>{e.target.disabled=true;try{const r=await api('/backup',{method:'POST'});$('#backupResult').textContent='Copia creada: '+r.path;}finally{e.target.disabled=false;}});}
+boot().catch(()=>showLogin());
+</file>
+
+<file path="public/index.html">
+<!doctype html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>IVESS · Personas</title><link rel="stylesheet" href="/style.css?v=3"></head><body>
+<div id="login" class="login"><div class="login-card"><div class="waterline"></div><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><div class="login-eyebrow">GESTIÓN DE PERSONAS</div><h1>Tu equipo<br>empieza acá.</h1><p>Gestión de postulantes · Red interna</p><form id="loginForm"><label id="setupLabel" hidden>Clave de instalación<input name="token" autocomplete="off"><small>Disponible en data/clave-inicial.txt del servidor.</small></label><label>Usuario<input name="username" required autocomplete="username"></label><label>Contraseña<input name="password" type="password" required autocomplete="current-password"></label><button class="primary" id="loginButton">Ingresar</button><p id="loginError" role="alert"></p></form><div class="login-partner"><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."><span>Un mismo equipo.<br>Más posibilidades.</span></div></div></div>
+<div id="app" hidden><aside><div class="brand"><img src="/assets/reference-logo-0.png" alt="IVESS"><span>RECURSOS HUMANOS</span></div><p class="nav-title">ESPACIO DE TRABAJO</p><nav><button data-view="whatsapp" class="active">WhatsApp y sincronización</button><button data-view="candidates">Postulantes y CV</button><button data-view="downloads">Descargas por fecha</button><button data-view="settings">Configuración</button></nav><div class="aside-bottom"><span class="dot"></span> Servidor local<p id="identity"></p><button id="logout">Cerrar sesión ↗</button></div></aside>
+<main><header><div>RECURSOS HUMANOS <span>/</span> <b id="breadcrumb">Postulantes</b></div><div class="header-brand"><span class="location">Virrey del Pino · Buenos Aires</span><img src="/assets/reference-logo-1.png" alt="Atilio Etchelar S.A."></div></header><section id="content"></section><footer>IVESS · Gestión de personas <span>Recepción de CV y datos con fuentes verificables.</span></footer></main></div>
+<dialog id="modal"><div id="modalContent"></div></dialog><div id="toast" role="status" hidden></div><script src="/reception.js?v=3" defer></script></body></html>
+</file>
+
+<file path="public/style.css">
+:root{font-family:Inter,"Segoe UI",sans-serif;color:#182d2a;background:#f4f6f4;font-synthesis:none}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d7dfda;background:white;border-radius:7px;padding:10px 15px;color:inherit}button:hover{background:#edf4ef}button:disabled{opacity:.55;cursor:wait}.primary{background:#176448;border-color:#176448;color:#fff}.primary:hover{background:#104d37}input,select,textarea{border:1px solid #d7dfda;background:white;border-radius:6px;padding:10px;width:100%;color:#263e36}textarea{min-height:95px;resize:vertical}label{display:grid;gap:7px;font-size:13px;color:#52645c}small{color:#7b8980;font-size:12px}h1{font-size:30px;letter-spacing:-1px;font-weight:650;margin:0 0 10px}h2{font-size:20px;margin:0 0 14px}h3{font-size:16px}p{line-height:1.6;color:#738079}aside{position:fixed;inset:0 auto 0 0;width:236px;background:#fff;border-right:1px solid #e1e6e1;padding:35px 22px;display:flex;flex-direction:column}.brand{font-size:43px;font-weight:850;letter-spacing:-3px;color:#17734b;line-height:1}.brand span{display:block;font-size:10px;letter-spacing:4px;margin:13px 0 0 4px;color:#6c8072;font-weight:600}.nav-title{font-size:10px;letter-spacing:1.5px;margin:55px 10px 15px}nav{display:grid;gap:9px}nav button{border:0;text-align:left;background:transparent;font-size:14px;padding:13px}nav button.active{background:#eaf2eb;color:#176448;font-weight:650}.aside-bottom{margin-top:auto;font-size:12px;color:#6b7c72}.aside-bottom p{margin:8px 0}.aside-bottom button{border:0;padding-left:0;font-size:12px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#43a66b;margin-right:6px}main{margin-left:236px}header{height:82px;padding:0 40px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid #e1e6e1;font-size:11px;letter-spacing:1px}header span{color:#a3b0a8;margin:0 14px}header b{font-weight:500;letter-spacing:0}.location{letter-spacing:0;color:#738079}#content{padding:38px 40px;min-height:calc(100vh - 140px)}.heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:25px;gap:15px}.heading p{margin:0;font-size:14px}.actions{display:flex;gap:10px;align-items:center}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:28px}.stat,.panel{background:white;border:1px solid #dfe6df;border-radius:10px}.stat{padding:22px}.stat small{font-size:12px}.stat strong{font-size:32px;display:block;margin:9px 0 4px;font-weight:600}.stat span{font-size:11px;color:#758579}.stat:first-child{border-top:3px solid #257452;padding-top:20px}.panel{padding:23px;margin-bottom:22px}.filters{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:12px;margin:18px 0}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px;white-space:nowrap}th{font-weight:500;color:#7b877f;font-size:11px;background:#f8faf8;padding:13px 12px;border-bottom:1px solid #e5eae5}td{padding:17px 12px;border-bottom:1px solid #edf0ec}td input{width:auto}td button{padding:6px 10px;font-size:12px}.person{display:flex;gap:11px;align-items:center}.avatar{background:#eaf1e8;color:#4f7057;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:600}.person small{display:block;margin-top:5px}.badge{padding:5px 9px;background:#f0f2eb;color:#6e7757;border-radius:20px;font-size:11px}.badge.green{background:#e8f3eb;color:#267451}.empty{text-align:center;padding:55px 20px;color:#7a8c80}.empty strong{display:block;color:#385943;font-size:18px;margin-bottom:8px}.notice{padding:15px 19px;background:#ecf2e9;border:1px solid #dce6d5;border-radius:8px;color:#60714e;font-size:12px;line-height:1.6}.muted{color:#7b8981;font-size:12px}.toolbar{display:flex;align-items:center;gap:12px;margin:15px 0}.toolbar select{width:auto}footer{padding:18px 40px;font-size:11px;color:#89958a;display:flex;justify-content:space-between;border-top:1px solid #e0e6e0}dialog{width:820px;max-width:95vw;border:0;border-radius:13px;padding:30px;color:inherit;max-height:90vh;box-shadow:0 20px 100px #1232}dialog::backdrop{background:#172e2866;backdrop-filter:blur(2px)}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}.wide{grid-column:1/-1}.modal-head{display:flex;justify-content:space-between;align-items:center}.modal-head button{border:0;font-size:20px}.form-actions{display:flex;justify-content:flex-end;gap:10px;border-top:1px solid #e5eae4;padding-top:18px}.login{min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at top left,#dcebdc,transparent 70%)}.login-card{width:440px;max-width:92vw;background:white;padding:42px;border:1px solid #dae4d8;border-radius:14px}.login-card h1{font-size:26px;margin-top:40px}.login-card form{display:grid;gap:18px;margin-top:30px}#loginError{color:#ae443d;font-size:13px;margin:0}#toast{position:fixed;bottom:25px;right:25px;max-width:450px;padding:17px 24px;background:#173f30;color:white;border-radius:8px;box-shadow:0 10px 40px #0002;z-index:10}pre{white-space:pre-wrap;max-height:250px;overflow:auto;font:12px/1.6 Consolas,monospace;background:#f5f7f4;padding:14px}a{color:#196c49}.campaign{display:flex;justify-content:space-between;gap:20px;align-items:center}.campaign p{font-size:13px}.campaign strong{font-size:22px}.campaign small{display:block}details{margin-top:16px}.error{color:#ac403b}input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid #85b399;outline-offset:2px}[hidden]{display:none!important}@media(max-width:1000px){aside{width:185px;padding:28px 15px}main{margin-left:185px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:15px}header{padding:0 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}}@media(max-width:650px){aside{position:static;width:auto;padding:18px}.brand{font-size:30px}.brand span{display:none}.nav-title,.aside-bottom{display:none}nav{display:flex;margin-top:15px}nav button{font-size:12px;padding:8px}main{margin:0}header{height:50px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.actions{flex-wrap:wrap}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:15px}.toolbar{flex-wrap:wrap}footer span{display:none}dialog{padding:20px}}
+/* Identidad visual IVESS / Atilio Etchelar, tomada del separador de referencia. */
+:root{--navy:#064275;--blue:#0a67aa;--aqua:#21b4dc;--pale:#edf8fd;--line:#cfe2ec;color:#162b3b;background:#eaf5fb}
+body{min-height:100vh;background:radial-gradient(circle at 95% 5%,#21b4dc25,transparent 32rem),linear-gradient(145deg,#f8fcff,#eaf6fc 65%,#e0f1fa)}
+button{border-color:var(--line);border-radius:11px;padding:11px 16px;color:var(--blue);font-weight:600;transition:background .16s,box-shadow .16s}
+button:hover{background:#eef8fd;border-color:#8bc4dc;box-shadow:0 4px 12px #0642750b}
+.primary{background:linear-gradient(105deg,var(--navy),var(--blue) 65%,#158fbe);border-color:transparent;color:white;box-shadow:0 7px 17px #06427524}
+.primary:hover{background:linear-gradient(105deg,#07518b,#087cbe 70%,#19a0cc);border-color:transparent}
+input,select,textarea{border-color:#c6dce8;border-radius:10px;padding:11px 12px;min-width:0;color:#162b3b}
+input::placeholder{color:#6e8594}input[type=checkbox]{accent-color:var(--blue);width:17px;height:17px;cursor:pointer}
+input[type=file]{background:var(--pale);border-style:dashed;font-size:12px}input::file-selector-button{border:0;border-radius:6px;background:#d9edf8;color:var(--navy);padding:7px 10px;margin-right:12px}
+label{color:var(--navy);font-weight:600}small,p,.muted{color:#586f7e}small{font-weight:400}
+h1{font-size:clamp(26px,2.4vw,36px);line-height:1.15;letter-spacing:-1.1px;font-weight:750;color:var(--navy)}h2,h3{color:var(--navy)}
+aside{width:244px;background:linear-gradient(180deg,#fff 35%,#f1f9fd);border-color:var(--line);padding:35px 20px 24px;z-index:2}
+.brand{line-height:1;text-align:center;padding:0 12px}.brand img{display:block;width:100%;max-width:185px;height:66px;object-fit:contain;margin:auto}.brand span{font-size:9px;letter-spacing:2.1px;margin-top:13px;color:var(--blue);font-weight:750}
+.nav-title{font-size:10px;font-weight:650;letter-spacing:1.3px;margin:47px 13px 15px;color:#647f90}
+nav button{color:#547286;border-radius:12px;padding:14px}nav button.active{background:linear-gradient(105deg,var(--navy),var(--blue));color:white;box-shadow:0 7px 16px #06427525}
+.aside-bottom{color:#547286;padding:18px 12px 0;border-top:1px solid var(--line)}.aside-bottom p{color:var(--navy);font-weight:650}.aside-bottom button{background:transparent}.dot{background:#269d7a;box-shadow:0 0 0 3px #269d7a17}
+main{margin-left:244px}header{height:92px;padding:15px 38px;gap:20px;background:#ffffffbd;border-color:#d1e6f0;font-size:10px;color:var(--blue)}header b{font-weight:600;font-size:12px;color:var(--navy)}
+.header-brand{display:flex;gap:23px;align-items:center}.header-brand img{width:128px;height:51px;object-fit:contain}.location{color:#586f7e;font-size:11px}
+#content{padding:34px 38px;min-height:calc(100vh - 146px);max-width:1700px;margin:auto}.heading{gap:22px}.heading p{font-size:13px}
+#content>.heading{position:relative;padding:30px 28px 28px;background:linear-gradient(115deg,#ffffffef,#f4fbffdd);border:1px solid #c5deeb;border-radius:20px;box-shadow:0 12px 36px #0642750d;overflow:hidden}
+#content>.heading::before{content:'';position:absolute;inset:0 0 auto;height:5px;background:linear-gradient(90deg,var(--navy),var(--blue) 55%,var(--aqua))}
+.actions{flex-shrink:0;font-size:13px}.stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:25px}
+.stat,.panel{background:#ffffffed;border:1px solid var(--line);border-radius:17px;box-shadow:0 12px 36px #0642750d}
+.stat{position:relative;padding:21px 23px;overflow:hidden}.stat::after{content:'';position:absolute;right:-17px;bottom:-24px;width:90px;height:90px;border:16px solid #21b4dc09;border-radius:50%;pointer-events:none}
+.stat small{font-size:11px;text-transform:uppercase;font-weight:700;letter-spacing:.65px;color:var(--blue)}.stat strong{font-size:35px;margin:10px 0 5px;font-weight:750;color:var(--navy);line-height:1.1}.stat span{color:#586f7e}
+.stat:first-child{padding-top:21px;background:linear-gradient(120deg,#064275,#0a67aa);border:1px solid #0a67aa}.stat:first-child small{color:#d4efff}.stat:first-child strong{color:white}.stat:first-child span{color:#d1e9f7}.stat:first-child::after{border-color:#ffffff0a}
+.panel{padding:25px;overflow:hidden}.panel>.heading{margin-bottom:18px}.panel>.heading h2{margin:0}.filters{gap:11px;font-size:12px}
+.table-wrap{border:1px solid #dceaf2;border-radius:12px}th{font-weight:700;color:#416985;font-size:10px;letter-spacing:.7px;background:#edf7fc;padding:14px 12px;border-color:#d7e8f2}td{border-color:#e6f0f6}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#f5fbfe}tbody tr:has(input:checked){background:#edf8fd}td button{border-radius:8px;font-size:11px}
+.person{font-weight:600;color:var(--navy)}.avatar{background:linear-gradient(140deg,#e1f2fb,#d0eaf8);color:var(--blue);width:38px;height:38px;border-radius:12px;border:1px solid #c1e2f2}
+.badge{background:#fff4dc;color:#805a16;font-weight:600;display:inline-block}.badge.green{background:#e5f5ee;color:#237150}
+.empty{color:#586f7e;font-size:13px;background:radial-gradient(ellipse at center,#edf8fd99,transparent 70%)}.empty::before{content:'';display:block;width:32px;height:32px;border-radius:50% 50% 50% 7px;transform:rotate(45deg);background:linear-gradient(145deg,var(--blue),var(--aqua));margin:0 auto 23px;box-shadow:0 7px 20px #0a67aa22}.empty strong{color:var(--navy)}
+.notice{background:#edf8fdd9;border:1px solid #c3dfed;border-left:4px solid var(--aqua);border-radius:12px;color:#3f667c;line-height:1.7}.toolbar{font-size:12px}.toolbar #selectionCount{margin-right:auto}
+footer{font-size:10px;color:#5c7a8e;border-color:#d1e5f0;gap:20px}
+dialog{border:1px solid #c2ddea;border-top:5px solid var(--blue);border-radius:20px;box-shadow:0 25px 100px #06427538;background:linear-gradient(155deg,#fff,#f5fbfe)}dialog::backdrop{background:#082e4a66;backdrop-filter:blur(5px)}.modal-head h2{margin:0}.modal-head button{background:#eaf5fc;padding:4px 12px}.form-actions{border-color:var(--line);margin-top:15px}
+.login{padding:35px 20px;background:radial-gradient(circle at 13% 20%,#21b4dc21,transparent 28rem),radial-gradient(circle at 90% 80%,#0a67aa18,transparent 30rem)}
+.login-card{position:relative;overflow:hidden;width:470px;max-width:100%;background:#ffffffef;padding:40px 44px 28px;border:1px solid #bfdae9;border-radius:24px;box-shadow:0 20px 65px #06427520}.waterline{position:absolute;inset:0 0 auto;height:7px;background:linear-gradient(90deg,var(--navy),var(--blue) 52%,var(--aqua))}
+.login-card .brand{padding:0;display:flex;align-items:center;gap:20px;text-align:left}.login-card .brand img{width:152px;height:62px;margin:0}.login-card .brand span{font-size:9px;line-height:1.8;letter-spacing:1.8px;border-left:1px solid var(--line);padding-left:20px;margin:0;max-width:140px}
+.login-eyebrow{font-size:10px;color:var(--blue);letter-spacing:1.8px;font-weight:750;margin-top:35px}.login-card h1{font-size:38px;line-height:1.12;margin:24px 0 12px}.login-card>p{font-size:13px}.login-card form .primary{min-height:47px}.login-partner{display:flex;align-items:center;justify-content:space-between;gap:20px;border-top:1px solid var(--line);padding-top:22px;margin-top:24px}.login-partner img{width:125px;height:50px;object-fit:contain}.login-partner span{font-size:11px;color:#586f7e;line-height:1.6}
+#toast{background:var(--navy);border:1px solid #2773a2;border-radius:13px;box-shadow:0 10px 40px #06427530;max-width:min(450px,calc(100vw - 32px));font-size:13px}pre{background:#edf6fb;border-radius:10px}a{color:var(--blue)}.campaign strong{font-size:28px;color:var(--navy)}summary{cursor:pointer;color:var(--navy)}hr{border:0;border-top:1px solid var(--line);margin:24px 0}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--aqua);outline-offset:2px;box-shadow:0 0 0 4px #21b4dc15}
+@media(min-width:1200px) and (max-width:1450px){#content>.heading{align-items:flex-start;flex-direction:column}.actions{align-self:flex-end}}
+@media(max-width:1199px){aside{width:210px;padding:28px 16px}.brand img{height:57px}main{margin-left:210px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:18px}.stat small{font-size:10px}header{padding:15px 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}.panel>.heading{gap:8px}.actions{flex-wrap:wrap}#content>.heading{padding:26px}}
+@media(max-width:760px){aside{position:static;width:auto;padding:15px 18px;background:#ffffffeb}.brand{display:flex;align-items:center;gap:15px;padding:0}.brand img{width:105px;height:40px;margin:0}.brand span{display:block;margin:0;font-size:8px;letter-spacing:1.6px}.nav-title{display:none}.aside-bottom{display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px 0 0;font-size:10px}.aside-bottom p{margin:0}.aside-bottom button{margin-left:auto;padding:0;font-size:10px}nav{display:flex;margin-top:16px;gap:6px}nav button{font-size:11px;padding:10px;flex:1;text-align:center;border-radius:9px}main{margin:0}header{height:60px;padding:10px 18px;font-size:9px}.header-brand img{width:91px;height:36px}header b{font-size:10px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.stat{padding:18px}.stat strong{font-size:30px}.stat span{font-size:10px}#content>.heading{padding:24px 19px;gap:20px;border-radius:17px}h1{font-size:28px}.heading p{font-size:12px;line-height:1.7}.actions{width:100%;gap:8px}.actions button{flex:1;padding:11px 9px;font-size:11px}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:17px;border-radius:15px}.filters{gap:9px}.filters input,.filters select{padding:11px 9px;font-size:11px}.toolbar{flex-wrap:wrap;gap:8px}.toolbar button{padding:9px 10px;font-size:11px}.toolbar #selectionCount{width:100%;margin-bottom:4px}.campaign{flex-wrap:wrap}.campaign>div:first-child{width:100%}footer{padding:18px}footer span{display:none}dialog{padding:22px 18px;border-radius:17px}.notice{padding:13px 15px;font-size:11px}.login-card{padding:32px 27px 25px}.login-card h1{font-size:34px}.login-card .brand img{width:135px}.login-card .brand span{padding-left:15px}.login-partner span{font-size:10px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+.block{display:block;margin-top:5px}.qr{width:260px;height:260px;max-width:100%;object-fit:contain}.checkline{display:flex;align-items:center;gap:10px;line-height:1.6;margin:16px 0}.checkline input{width:auto;flex-shrink:0}fieldset{border:1px solid var(--line);border-radius:12px;padding:15px}.employment{border:1px solid var(--line);border-radius:12px;padding:18px;margin:18px 0}.employment p{white-space:pre-wrap}.download-link{display:inline-block;padding:12px 20px;background:var(--blue);color:white;border-radius:10px}#peopleRows{margin-top:20px}@media(max-width:760px){nav{flex-wrap:wrap}nav button{flex:1 1 40%}.employment{padding:12px}.qr{width:220px;height:220px}}
+</file>
+
 <file path="test/integration.test.js">
 const {test,after}=require('node:test');
 const assert=require('node:assert/strict');
@@ -1178,21 +1224,6 @@ test('Acceso, fichas concurrentes, importación, convocatorias y permisos',async
 after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(dir,{recursive:true,force:true});});
 </file>
 
-<file path=".gitignore">
-node_modules/
-data/
-backups/
-*.log
-.env
-.env.*
-!.env.example
-*.sqlite*
-*.db
-*.pem
-*.key
-__pycache__/
-</file>
-
 <file path="package.json">
 {
   "name": "rrhh-ivess",
@@ -1234,37 +1265,6 @@ __pycache__/
     "url": "https://github.com/marcosmartinezaesa/rrhh.git"
   }
 }
-</file>
-
-<file path="public/app.js">
-const $=s=>document.querySelector(s);
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let people=[],campaigns=[],me,view='candidates',selected=new Set(),needsSetup=false;
-async function api(url,options={}){const r=await fetch('/api'+url,{...options,headers:options.body instanceof FormData?{}:{'Content-Type':'application/json'},body:options.body instanceof FormData?options.body:options.body?JSON.stringify(options.body):undefined});const data=await r.json();if(!r.ok){if(r.status===401&&url!=='/login'){showLogin();}throw Error(data.error||'No se pudo completar la operación');}return data;}
-function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').hidden=true,6500);}
-function bind(selector,event,fn){$(selector)?.addEventListener(event,async e=>{try{await fn(e);}catch(err){toast(err.message);}});}
-function modal(html){$('#modalContent').innerHTML=html;$('#modal').showModal();bind('#closeModal','click',()=>$('#modal').close());}
-const modalHead=title=>`<div class="modal-head"><h2>${esc(title)}</h2><button type="button" id="closeModal" aria-label="Cerrar">×</button></div>`;
-const options=(items,current)=>items.map(x=>`<option ${x===current?'selected':''}>${esc(x)}</option>`).join('');
-async function showLogin(){needsSetup=(await api('/auth')).needsSetup;$('#app').hidden=true;$('#login').hidden=false;$('#setupLabel').hidden=!needsSetup;$('#loginButton').textContent=needsSetup?'Crear administrador':'Ingresar';}
-bind('#loginForm','submit',async e=>{e.preventDefault();$('#loginError').textContent='';const body=Object.fromEntries(new FormData(e.target));try{if(needsSetup)await api('/setup',{method:'POST',body});await api('/login',{method:'POST',body});e.target.reset();await boot();}catch(err){$('#loginError').textContent=err.message;}});
-bind('#logout','click',async()=>{await api('/logout',{method:'POST'});$('#modal').close();await showLogin();});
-document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;render();}));
-async function refresh(){[people,campaigns]=await Promise.all([api('/candidates'),api('/campaigns')]);}
-async function boot(){me=await api('/me');await refresh();$('#identity').textContent=me.username;$('#login').hidden=true;$('#app').hidden=false;render();}
-function render(){document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('#breadcrumb').textContent={candidates:'Postulantes',campaigns:'Convocatorias',settings:'Configuración'}[view];({candidates:renderPeople,campaigns:renderCampaigns,settings:renderSettings}[view])();}
-function renderPeople(){const confirmed=campaigns.reduce((n,c)=>n+c.invitations.filter(i=>i.status==='Confirmó').length,0);$('#content').innerHTML=`<div class="heading"><div><h1>Encontrá tu próximo equipo.</h1><p>Todos los postulantes, un solo lugar para dar el siguiente paso.</p></div><div class="actions"><button id="import">↑ &nbsp; Importar Excel</button><button class="primary" id="new">+ &nbsp; Nuevo postulante</button></div></div><div class="stats">${[['Postulantes',people.length,'Fichas en tu base'],['Por revisar',people.filter(p=>p.status==='Pendiente').length,'Pendientes de evaluación'],['Preseleccionados',people.filter(p=>p.status==='Preseleccionado').length,'Revisados por el equipo'],['Confirmaciones',confirmed,'En todas las convocatorias']].map(([a,b,c])=>`<div class="stat"><small>${a}</small><strong>${b}</strong><span>${c}</span></div>`).join('')}</div><div class="panel"><div class="heading"><h2>Base de postulantes</h2><span class="muted">Selección con revisión humana</span></div><div class="filters"><input id="search" placeholder="Buscar nombre, teléfono o localidad" aria-label="Buscar postulantes"><select id="statusFilter" aria-label="Estado">${options(['Todos los estados','Pendiente','Revisado','Preseleccionado','Archivado'])}</select><select id="licenseFilter" aria-label="Licencia">${options(['Todas las licencias','B1','B2','C1','C2','C3','E1','Sin dato'])}</select><input id="radius" type="number" min="0" placeholder="Radio máximo (km)" aria-label="Radio máximo en kilómetros"></div><div class="toolbar"><span id="selectionCount" class="muted"></span><button id="addToCampaign">Agregar a convocatoria</button><button id="reload">↻ Actualizar</button></div><div class="table-wrap"><table><thead><tr><th></th><th>POSTULANTE</th><th>LOCALIDAD</th><th>LICENCIA</th><th>DISTANCIA</th><th>ESTADO</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div id="empty" class="empty" hidden></div></div><div class="notice">Ubicación de referencia: Juan Manuel de Rosas 21028, Virrey del Pino. Radio inicial sugerido: 15 km, pendiente de validar. Las distancias se cargan manualmente; si faltan, el postulante permanece visible para revisión.</div>`;bind('#new','click',()=>editPerson());bind('#import','click',importExcel);bind('#reload','click',async()=>{await refresh();render();});bind('#addToCampaign','click',addToCampaign);['#search','#statusFilter','#licenseFilter','#radius'].forEach(s=>bind(s,'input',drawRows));drawRows();}
-function drawRows(){const term=$('#search').value.toLowerCase();const status=$('#statusFilter').value;const license=$('#licenseFilter').value;const radius=$('#radius').value;const rows=people.filter(p=>[p.name,p.phone,p.cvPhone,p.locality].join(' ').toLowerCase().includes(term)&&(status==='Todos los estados'||p.status===status)&&(license==='Todas las licencias'||(license==='Sin dato'?!p.license:p.license.toUpperCase().split(/[\s,;/]+/).includes(license)))&&(!radius||p.distance==null||p.distance<=Number(radius)));$('#rows').innerHTML=rows.map(p=>`<tr><td><input type="checkbox" aria-label="Seleccionar ${esc(p.name)}" data-select="${p.id}" ${selected.has(p.id)?'checked':''}></td><td><div class="person"><span class="avatar">${esc(p.name.split(' ').map(s=>s[0]).slice(0,2).join('').toUpperCase())}</span><div>${esc(p.name)}<small>${esc(p.phone||(p.cvPhone?'CV: '+p.cvPhone:'WhatsApp por confirmar'))}</small></div></div></td><td>${esc(p.locality||'Por confirmar')}</td><td>${esc(p.license||'Sin dato')}</td><td>${p.distance==null?'Por confirmar':esc(p.distance)+' km'}</td><td><span class="badge ${p.status==='Preseleccionado'?'green':''}">${esc(p.status)}</span></td><td><button data-edit="${p.id}">Ver ficha ↗</button></td></tr>`).join('');$('#empty').hidden=!!rows.length;$('#empty').innerHTML=people.length?'<strong>No hay coincidencias</strong>Probá con otros filtros.':'<strong>Un nuevo equipo empieza con una ficha</strong>Cargá el primer postulante o importá un Excel para empezar.';document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>editPerson(Number(b.dataset.edit)).catch(e=>toast(e.message)));document.querySelectorAll('[data-select]').forEach(b=>b.onchange=()=>{const id=Number(b.dataset.select);b.checked?selected.add(id):selected.delete(id);selectionCount();});selectionCount();}
-function selectionCount(){$('#selectionCount').textContent=`${selected.size} seleccionados`;} 
-async function editPerson(id){const p=id?await api('/candidates').then(rows=>rows.find(r=>r.id===id)):{};if(!p)throw Error('Ficha no encontrada');const input=(key,label,type='text')=>`<label>${label}<input name="${key}" type="${type}" ${key==='name'?'required':''} ${type==='number'?'min="0" step="0.1"':''} value="${esc(p[key])}"></label>`;modal(`${modalHead(id?'Ficha del postulante':'Nuevo postulante')}<form id="personForm"><div class="form-grid">${input('name','Nombre y apellido')}${input('phone','WhatsApp del chat')}${input('cvPhone','Teléfono indicado en el CV')}${input('locality','Localidad')}${input('address','Domicilio declarado')}${input('distance','Distancia verificada (km)','number')}${input('license','Licencia declarada (ej.: B1, C1)')}${input('licenseExpiry','Vencimiento de licencia','date')}<label>Mayoría de edad declarada<select name="adult">${options(['Por confirmar','Sí','No'],p.adult)}</select></label><label>Estado de revisión<select name="status">${options(['Pendiente','Revisado','Preseleccionado','Archivado'],p.status)}</select></label>${input('availability','Disponibilidad y traslado')}${input('source','Origen del dato')}<label class="wide">Experiencia<textarea name="experience">${esc(p.experience)}</textarea></label><label class="wide">Notas y evidencias<textarea name="notes">${esc(p.notes)}</textarea></label></div><div id="phoneWarning" class="notice" hidden>El WhatsApp del chat difiere del teléfono del CV. Verificá a quién corresponde antes de contactar.</div><div class="form-actions"><button class="primary">Guardar ficha</button></div></form>${id?'<hr><h3>Currículums y lectura</h3><p class="muted">PDF, JPG o PNG · máximo 15 MB. Los datos extraídos deben verificarse y copiarse a la ficha.</p><form id="uploadForm" class="toolbar"><input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required><button>Cargar y leer CV</button></form><div id="documents"></div>':'<p class="muted">Guardá la ficha para adjuntar el CV.</p>'}`);const warning=()=>{const f=$('#personForm');const a=f.elements.phone.value.replace(/\D/g,'');const b=f.elements.cvPhone.value.replace(/\D/g,'');$('#phoneWarning').hidden=!(a&&b&&a!==b);};bind('#personForm','input',warning);warning();bind('#personForm','submit',async e=>{e.preventDefault();const body={...Object.fromEntries(new FormData(e.target)),version:p.version};await api(id?'/candidates/'+id:'/candidates',{method:id?'PUT':'POST',body});$('#modal').close();await refresh();render();toast('Ficha guardada');});if(id){await documents(id);bind('#uploadForm','submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await api(`/candidates/${id}/documents`,{method:'POST',body:new FormData(e.target)});e.target.reset();await documents(id);toast('CV guardado. La lectura se procesa en el servidor.');}finally{b.disabled=false;}});}}
-async function documents(id){const docs=await api(`/candidates/${id}/documents`);$('#documents').innerHTML=docs.map(d=>`<details><summary>${esc(d.original)} · ${esc(d.status)}</summary><p><a href="/api/documents/${d.id}">Descargar original</a></p><pre>${esc(d.text||'Sin texto disponible todavía. Actualizá la lectura en unos instantes.')}</pre></details>`).join('')+'<button type="button" id="refreshDocs">Actualizar lectura</button>';bind('#refreshDocs','click',()=>documents(id));}
-function importExcel(){modal(`${modalHead('Importar postulantes desde Excel')}<p>Se detecta la hoja EVALUACION o la primera hoja y sus encabezados. Los datos adicionales se conservan en notas. Revisá la vista previa antes de incorporar las fichas.</p><form id="excelForm" class="toolbar"><input type="file" name="file" accept=".xlsx" required><button class="primary">Leer archivo</button></form><div id="preview"></div>`);bind('#excelForm','submit',async e=>{e.preventDefault();const result=await api('/import/preview',{method:'POST',body:new FormData(e.target)});const good=result.rows.filter(r=>r.name);$('#preview').innerHTML=`<p>${esc(result.sheet)} · Encabezados en fila ${result.headerRow} · ${good.length} filas con nombre / ${result.rows.length} filas totales.</p><p class="muted">Columnas conservadas en notas: ${esc(result.headers.filter(h=>!h.field).map(h=>h.label).join(', ')||'Ninguna')}. Los resultados del Excel quedan como antecedentes; todas las fichas se importan pendientes de revisión.</p><div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Contacto</th><th>Localidad</th><th>Licencia</th></tr></thead><tbody>${good.slice(0,100).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.phone||r.cvPhone)}</td><td>${esc(r.locality)}</td><td>${esc(r.license)}</td></tr>`).join('')}</tbody></table></div><p class="muted">Vista previa de hasta 100 filas. Duplicados exactos por nombre y ambos teléfonos se omiten. Las filas sin nombre no se importan.</p><button id="commitImport" class="primary" ${good.length?'':'disabled'}>Importar ${good.length} fichas</button>`;bind('#commitImport','click',async e=>{e.target.disabled=true;try{const r=await api('/import/commit',{method:'POST',body:{rows:good}});$('#modal').close();await refresh();render();toast(`${r.added} fichas importadas; ${r.skipped} duplicadas omitidas`);}finally{e.target.disabled=false;}});});}
-function renderCampaigns(){$('#content').innerHTML=`<div class="heading"><div><h1>Conversaciones que abren puertas.</h1><p>Organizá entrevistas y registrá cada respuesta.</p></div><button id="newCampaign" class="primary">+ Nueva convocatoria</button></div>${campaigns.length?campaigns.map(c=>`<div class="panel"><div class="campaign"><div><h2>${esc(c.title)}</h2><p>${esc(c.date)} · ${esc(c.time)} hs · Cupo: ${c.capacity}</p><button data-campaign="${c.id}">Ver convocatoria ↗</button></div><div><strong>${c.invitations.length} / ${c.capacity}</strong><small>seleccionados</small></div><div><strong>${c.invitations.filter(i=>i.status==='Confirmó').length}</strong><small>confirmados</small></div></div></div>`).join(''):'<div class="panel empty"><strong>Prepará tu primera convocatoria</strong>Definí fecha, hora y cupo; luego agregá personas desde Postulantes.</div>'}<div class="notice">Las invitaciones se preparan para copiar. El envío y la confirmación se registran manualmente en esta etapa.</div>`;bind('#newCampaign','click',newCampaign);document.querySelectorAll('[data-campaign]').forEach(b=>b.onclick=()=>campaignDetail(Number(b.dataset.campaign)));}
-function newCampaign(){modal(`${modalHead('Nueva convocatoria')}<form id="campaignForm"><div class="form-grid"><label class="wide">Título<input name="title" required placeholder="Entrevistas · Reparto y distribución"></label><label>Fecha<input name="date" type="date" required></label><label>Horario de inicio<input name="time" type="time" required></label><label>Cupo de postulantes<input name="capacity" type="number" min="1" max="1000" value="40" required></label></div><div class="form-actions"><button class="primary">Crear convocatoria</button></div></form>`);bind('#campaignForm','submit',async e=>{e.preventDefault();await api('/campaigns',{method:'POST',body:Object.fromEntries(new FormData(e.target))});$('#modal').close();await refresh();render();});}
-function addToCampaign(){if(!selected.size)return toast('Seleccioná al menos un postulante');if(!campaigns.length){view='campaigns';render();return newCampaign();}modal(`${modalHead('Agregar a una convocatoria')}<p>${selected.size} postulantes seleccionados, incluidos los que no se ven por los filtros.</p><form id="assignForm"><label>Convocatoria<select name="campaign">${campaigns.map(c=>`<option value="${c.id}">${esc(c.title)} · ${c.invitations.length}/${c.capacity}</option>`).join('')}</select></label><p class="muted">Agregar personas no envía mensajes.</p><button class="primary">Agregar selección</button></form>`);bind('#assignForm','submit',async e=>{e.preventDefault();await api(`/campaigns/${e.target.elements.campaign.value}/invitations`,{method:'POST',body:{ids:[...selected]}});selected.clear();$('#modal').close();await refresh();render();toast('Selección agregada a la convocatoria');});}
-function campaignDetail(id){const c=campaigns.find(c=>c.id===id);modal(`${modalHead(c.title)}<p>${esc(c.date)} · ${esc(c.time)} hs · ${c.invitations.length}/${c.capacity} seleccionados · ${c.invitations.filter(i=>i.status==='Confirmó').length} confirmados</p><div class="table-wrap"><table><thead><tr><th>Postulante</th><th>Respuesta / asistencia</th><th>Invitación</th></tr></thead><tbody>${c.invitations.map(i=>`<tr><td>${esc(i.name)}<br><small>${esc(i.phone||'Sin teléfono')}</small></td><td><select aria-label="Estado de ${esc(i.name)}" data-invite="${i.candidate_id}">${options(['Seleccionado','Invitado','Confirmó','No puede asistir','Sin respuesta','Asistió','No asistió'],i.status)}</select></td><td><button data-message="${i.candidate_id}">Preparar texto</button></td></tr>`).join('')}</tbody></table></div><div id="messageArea"></div>`);document.querySelectorAll('[data-invite]').forEach(s=>s.onchange=async()=>{try{await api(`/campaigns/${id}/invitations/${s.dataset.invite}`,{method:'PUT',body:{status:s.value}});await refresh();render();toast('Estado actualizado');}catch(e){toast(e.message);s.value=c.invitations.find(i=>i.candidate_id===Number(s.dataset.invite)).status;}});document.querySelectorAll('[data-message]').forEach(b=>b.onclick=()=>{const i=c.invitations.find(i=>i.candidate_id===Number(b.dataset.message));$('#messageArea').innerHTML=`<h3>Invitación para revisar y copiar</h3><textarea id="messageText" rows="6">${esc(`Hola ${i.name}, te contactamos de IVESS por tu postulación. Queremos invitarte a una entrevista el ${c.date} a las ${c.time} hs en Juan Manuel de Rosas 21028, Virrey del Pino. ¿Podés confirmar tu asistencia? ¡Gracias!`)}</textarea><p class="muted">Verificá el destinatario y el horario. Copiar el texto no envía el mensaje ni cambia el estado.</p><button id="copyMessage">Seleccionar texto para copiar</button>`;$('#copyMessage').onclick=()=>{$('#messageText').select();toast('Texto seleccionado. Usá Ctrl+C para copiar.');};});}
-function renderSettings(){$('#content').innerHTML=`<div class="heading"><div><h1>Tu espacio de trabajo.</h1><p>Administración del servidor y conexiones.</p></div></div><div class="panel"><h2>WhatsApp</h2><span class="badge">Pendiente de integración</span><p>Cuenta prevista: +54 9 11 5147-5803. La sesión propia de RR. HH. se conectará al incorporar el proyecto Transferencias de referencia.</p><small>Esta versión no vincula, importa conversaciones ni envía mensajes.</small></div><div class="panel"><h2>Lectura y evaluación</h2><p>PDF con texto: extracción directa. PDF escaneado e imágenes: OCR local. El texto original queda junto al archivo para verificar los datos.</p><p class="muted">No se calculan distancias por localidad ni se descartan personas automáticamente por edad. La licencia, disponibilidad, experiencia y traslado se revisan en cada ficha.</p></div>${me.role==='admin'?'<div class="panel"><h2>Nuevo usuario</h2><form id="userForm" class="form-grid"><label>Usuario<input name="username" required autocomplete="off"></label><label>Contraseña (mínimo 12 caracteres)<input name="password" type="password" minlength="12" required autocomplete="new-password"></label><div><button class="primary">Crear usuario</button></div></form></div><div class="panel"><h2>Copias de seguridad</h2><p>Guarda una copia de la base central y los CV en la carpeta backups del servidor.</p><button id="backup">Crear copia ahora</button><p id="backupResult" class="muted"></p></div>':''}`;bind('#userForm','submit',async e=>{e.preventDefault();await api('/users',{method:'POST',body:Object.fromEntries(new FormData(e.target))});e.target.reset();toast('Usuario creado');});bind('#backup','click',async e=>{e.target.disabled=true;try{const r=await api('/backup',{method:'POST'});$('#backupResult').textContent='Copia creada: '+r.path;}finally{e.target.disabled=false;}});}
-boot().catch(()=>showLogin());
 </file>
 
 <file path="repomix.config.json">
