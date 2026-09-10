@@ -1,0 +1,12 @@
+data/
+backups/
+node_modules/
+.git/
+.env*
+*.sqlite*
+*.db
+*.pem
+*.key
+*.log
+repomix-output.*
+package-lock.json
