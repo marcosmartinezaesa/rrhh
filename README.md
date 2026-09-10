@@ -18,7 +18,7 @@ No se abrieron puertos del firewall ni se configuró el router. Para redes no co
 - Control de modificaciones concurrentes: una ficha editada por otro usuario exige recargar antes de guardar.
 - Filtros por texto, estado, licencia declarada y distancia verificada manualmente. Sin distancia conocida, la ficha sigue visible. No hay ranking ni descarte automático por edad.
 - CV originales PDF/JPG/PNG hasta 15 MB. Extracción de texto PDF y OCR local de imágenes o PDF escaneados, máximo 20 páginas en OCR. Procesamiento OCR en serie. Texto disponible junto al original; completar los campos requiere revisión humana.
-- Excel XLSX: primera hoja, encabezados en fila 1, vista previa y confirmación de importación. Reconoce Nombre / Nombre y apellido / Postulante / Candidato, WhatsApp / Teléfono, Localidad, Domicilio / Dirección, Licencia / Registro, Experiencia, Observaciones. Hasta 2000 filas. Omite duplicados exactos de nombre y teléfono. Muestra columnas no reconocidas antes de importar; no adapta todavía el Excel original que no fue adjuntado.
+- Excel XLSX: detecta la hoja EVALUACION y encabezados en las primeras 30 filas; reconoce la planilla de referencia con encabezados en fila 8. Conserva observaciones y columnas adicionales en notas. Puntajes y resultados previos quedan como antecedentes, sin aplicar descartes. En la planilla de CV, los contactos se guardan como teléfono del CV y las licencias agrupadas quedan por confirmar. Vista previa y detección de duplicados por nombre y ambos teléfonos.
 - Convocatorias con fecha, horario inicial y cupo; selección manual, textos de invitación editables para copiar y estados de confirmación/asistencia. No realiza envíos. Un único horario por convocatoria; usar convocatorias separadas para distintos turnos.
 - Copia de seguridad manual de SQLite y CV desde Configuración. Usuarios y contraseñas cifradas mediante hash quedan incluidos en la base. Guardar las copias en un destino protegido externo al servidor.
 
@@ -38,7 +38,7 @@ El inicio automático y las copias programadas no están configurados. `iniciar.
 
 ## Pendiente de los archivos de referencia
 
-Se recibió `transferencias-main.zip` y se revisó su conexión de WhatsApp: ver [notas de referencia](docs/transferencias-referencia.md). El ZIP original queda en `data/referencias`, excluido de GitHub y Repomix. Siguen pendientes `Evaluacion_CVs_2026-09-09.xlsx` e `INICIAR_RRHH_IVESS_CODEX.md`. No se importaron candidatos ficticios como datos reales.
+Se recibió `transferencias-main.zip` y se revisó su conexión de WhatsApp: ver [notas de referencia](docs/transferencias-referencia.md). El ZIP original queda en `data/referencias`, excluido de GitHub y Repomix. También se recibió `Evaluacion_CVs_2026-09-09.xlsx`; su original y los datos importados se conservan solo en el servidor. Sigue pendiente `INICIAR_RRHH_IVESS_CODEX.md`. No se importaron candidatos ficticios como datos reales.
 
 WhatsApp queda pendiente: QR, sesión independiente, importación de chats/adjuntos, conciliación del teléfono de origen y sincronización de respuestas. También quedan para ampliación la extracción estructurada avanzada de CV, geocodificación/distancias verificadas y turnos individuales. No reutilizar ni modificar sesiones de los otros proyectos.
 
@@ -54,3 +54,5 @@ Ejecutar `npm run repomix` para actualizar `repomix-output.xml`, el resumen del 
 La configuración mantiene la [revisión de seguridad de Repomix](https://repomix.com/guide/security) y excluye CV, datos, copias, sesiones, secretos y dependencias instaladas. Los logos binarios se conservan en GitHub; Repomix resume archivos de texto.
 
 Repomix está fijado en 1.14.1 (correcciones de seguridad). Declara Node.js 22 o superior; la generación local fue verificada también con Node 20.19.4, pero para usar la herramienta en otras PC corresponde Node 22+. El servidor actual sigue usando Node 20.
+
+Importación local de administración: `node scripts/import-excel.js RUTA.xlsx` muestra el conteo. Agregar `--apply` carga las fichas en una transacción y crea previamente una copia de la base en `data/import-backups`. No adjunta los CV mencionados en el Excel: esos archivos deben cargarse por separado.

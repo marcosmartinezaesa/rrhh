@@ -56,12 +56,148 @@ public/style.css
 README.md
 repomix.config.json
 scripts/browser-check.js
+scripts/excel-import.js
+scripts/import-excel.js
 server.js
+test/excel-import.test.js
 test/integration.test.js
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="scripts/excel-import.js">
+const ExcelJS = require('exceljs');
+const normalize = value => String(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const aliases = {
+  nombre:'name', nombreyapellido:'name', postulante:'name', candidato:'name', candidatonombreyapellido:'name',
+  whatsapp:'phone', telefono:'phone', localidad:'locality', localidaddondevive:'locality',
+  domicilio:'address', direccion:'address', licencia:'license', registro:'license', licenciadeconducir:'license',
+  experiencia:'experience', experienciaenreparto:'experience', disponibilidadhoraria:'availability', observaciones:'notes'
+};
+function cellText(cell) {
+  let value = cell.value;
+  if (value && typeof value === 'object' && ('formula' in value || 'sharedFormula' in value)) value = value.result;
+  if (value == null) return '';
+  if (value instanceof Date) return value.toISOString().slice(0,10);
+  if (typeof value === 'object') {
+    if (value.richText) return value.richText.map(part=>part.text).join('');
+    if ('text' in value) return String(value.text);
+    if (value.error) return `[Error de Excel: ${value.error}]`;
+    return '';
+  }
+  return String(value).trim();
+}
+async function previewWorkbook(buffer, filename='Excel') {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const sheet = workbook.worksheets.find(s=>normalize(s.name)==='evaluacion') || workbook.worksheets[0];
+  if (!sheet) throw new Error('El Excel no contiene hojas');
+  if (sheet.rowCount>2000 || sheet.columnCount>100) throw new Error('Máximo 2000 filas y 100 columnas por importación');
+  let headerRow = 0, headers;
+  for (let i=1;i<=Math.min(sheet.rowCount,30);i++) {
+    const found=[];
+    sheet.getRow(i).eachCell((cell,col)=>{const label=cellText(cell);found.push({col,label,field:aliases[normalize(label)]||''});});
+    if(found.some(h=>h.field==='name')) {headerRow=i;headers=found;break;}
+  }
+  if(!headerRow) throw new Error('No se encontró una columna de nombre en las primeras 30 filas');
+  const evaluation = headers.some(h=>normalize(h.label)==='archivodelcv');
+  if(evaluation) headers=headers.map(h=>({...h,field:normalize(h.label)==='telefono'?'cvPhone':h.field}));
+  const rows=[];
+  sheet.eachRow((row,index)=>{
+    if(index<=headerRow) return;
+    const result={row:index,status:'Pendiente',source:`Excel: ${filename} · ${sheet.name} · fila ${index}`};
+    const originals=[];
+    for(const h of headers) {
+      const value=cellText(row.getCell(h.col));
+      if(h.field) result[h.field]=value;
+      if(value) originals.push(`${h.label.replace(/\s+/g,' ')}: ${value}`);
+    }
+    if(!result.name) return;
+    if(evaluation) {
+      // Una opción agrupada de la planilla no acredita cada categoría individual.
+      result.license='';
+      result.notes='Antecedente del Excel; requiere revisión. Puntaje, resultado y puesto son valores guardados, no decisiones del sistema. La licencia agrupada debe confirmarse.\n\n'+originals.join('\n');
+    } else {
+      const extras=headers.filter(h=>!h.field).map(h=>[h,cellText(row.getCell(h.col))]).filter(([,v])=>v).map(([h,v])=>`${h.label}: ${v}`);
+      result.notes=[result.notes,...extras].filter(Boolean).join('\n');
+    }
+    if(result.notes.length>12000) throw new Error(`La fila ${index} supera el tamaño de notas admitido; no se importará parcialmente`);
+    rows.push(result);
+  });
+  return {sheet:sheet.name,headerRow,headers,rows,evaluation};
+}
+module.exports={previewWorkbook};
+</file>
+
+<file path="scripts/import-excel.js">
+// Uso local del administrador: node scripts/import-excel.js archivo.xlsx [--apply]
+const fs=require('fs');
+const path=require('path');
+const Database=require('better-sqlite3');
+const {previewWorkbook}=require('./excel-import');
+async function main(){
+  const filename=process.argv[2];
+  if(!filename) throw new Error('Indicá la ruta del Excel; --apply confirma la carga local');
+  const preview=await previewWorkbook(fs.readFileSync(filename),path.basename(filename));
+  console.log(JSON.stringify({sheet:preview.sheet,headerRow:preview.headerRow,candidates:preview.rows.length}));
+  if(!process.argv.includes('--apply')) return;
+  const root=path.resolve(process.env.DATA_DIR||path.join(__dirname,'../data'));
+  const db=new Database(path.join(root,'rrhh.sqlite'),{fileMustExist:true});
+  try{
+    db.pragma('busy_timeout = 5000');
+    const dest=path.join(root,'import-backups',Date.now()+'.sqlite');
+    fs.mkdirSync(path.dirname(dest),{recursive:true});await db.backup(dest);
+    const keys=['name','phone','cvPhone','locality','address','license','licenseExpiry','adult','distance','availability','experience','notes','status','source'];
+    const insert=db.prepare(`INSERT INTO candidates(${keys.join(',')}) VALUES (${keys.map(k=>'@'+k).join(',')})`);
+    let added=0,skipped=0;
+    db.transaction(()=>{
+      for(const raw of preview.rows){
+        const row=Object.fromEntries(keys.map(k=>[k,raw[k]??'']));
+        row.status='Pendiente';row.adult='Por confirmar';row.distance=null;
+        if(db.prepare('SELECT id FROM candidates WHERE name=? AND phone=? AND cvPhone=?').get(row.name,row.phone,row.cvPhone)){skipped++;continue;}
+        insert.run(row);added++;
+      }
+      db.prepare('INSERT INTO audit(user_id,action) VALUES (NULL,?)').run(`Importación local Excel: ${added} fichas; ${skipped} duplicadas omitidas`);
+    })();
+    console.log(JSON.stringify({added,skipped,backup:dest}));
+  }finally{db.close();}
+}
+main().catch(e=>{console.error(e.message);process.exitCode=1;});
+</file>
+
+<file path="test/excel-import.test.js">
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const ExcelJS=require('exceljs');
+const {previewWorkbook}=require('../scripts/excel-import');
+test('Evaluación con fila 8, fórmulas, fechas UTC y categorías agrupadas sin descarte automático',async()=>{
+  const w=new ExcelJS.Workbook();w.addWorksheet('INSTRUCTIVO').getCell('A1').value='Referencia';
+  const s=w.addWorksheet('EVALUACION');
+  s.getRow(8).values=['Candidato (nombre y apellido)','Archivo del CV','Teléfono','Fecha de nac.\n(opcional)','Licencia de conducir','RESULTADO','Observaciones','PUNTAJE\n/100'];
+  s.getRow(9).values=['Persona ficticia','ejemplo.pdf','1100000000',new Date('1990-01-22T00:00:00Z'),'Profesional vigente (D1 / D2 / E1)',{formula:'"DESCARTAR"',result:'DESCARTAR'},'Confirmar categoría',0];
+  s.getRow(10).values=[null,null,null,null,null,{formula:'""',result:''}];
+  const p=await previewWorkbook(await w.xlsx.writeBuffer(),'prueba.xlsx');
+  assert.equal(p.headerRow,8);assert.equal(p.rows.length,1);const r=p.rows[0];
+  assert.equal(r.cvPhone,'1100000000');assert.equal(r.phone,undefined);assert.equal(r.license,'');assert.equal(r.status,'Pendiente');
+  assert.match(r.notes,/1990-01-22/);assert.match(r.notes,/RESULTADO: DESCARTAR/);assert.match(r.notes,/PUNTAJE \/100: 0/);assert.match(r.notes,/Confirmar categoría/);assert.doesNotMatch(r.notes,/object Object/);
+});
+</file>
+
+<file path=".repomixignore">
+data/
+backups/
+node_modules/
+.git/
+.env*
+*.sqlite*
+*.db
+*.pem
+*.key
+*.log
+repomix-output.*
+package-lock.json
+</file>
 
 <file path="docs/transferencias-referencia.md">
 # Referencia recibida: Transferencias
@@ -79,36 +215,6 @@ Componentes identificados en el código de referencia:
 La adaptación a RRHH debe crear una sesión independiente y vincular cada CV con el chat de origen. El reconocimiento de importes, bancos y comprobantes de Transferencias no corresponde a la evaluación de currículums.
 
 Esta revisión no activa la conexión de WhatsApp de RRHH ni modifica la sesión de Transferencias. La integración sigue pendiente.
-</file>
-
-<file path=".gitignore">
-node_modules/
-data/
-backups/
-*.log
-.env
-.env.*
-!.env.example
-*.sqlite*
-*.db
-*.pem
-*.key
-__pycache__/
-</file>
-
-<file path=".repomixignore">
-data/
-backups/
-node_modules/
-.git/
-.env*
-*.sqlite*
-*.db
-*.pem
-*.key
-*.log
-repomix-output.*
-package-lock.json
 </file>
 
 <file path="iniciar.cmd">
@@ -139,46 +245,6 @@ with tempfile.TemporaryDirectory(prefix='rrhh-ocr-') as folder:
         sys.stdout.buffer.write(result.stdout + b'\n')
 </file>
 
-<file path="package.json">
-{
-  "name": "rrhh-ivess",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": {
-    "test": "node --test",
-    "start": "node server.js",
-    "repomix": "repomix",
-    "repomix:stdout": "repomix --stdout"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "better-sqlite3": "^11.10.0",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.7.0",
-    "helmet": "^8.3.0",
-    "multer": "^2.3.0",
-    "pdf-parse": "^1.1.1"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "repomix": "1.14.1"
-  },
-  "overrides": {
-    "exceljs": {
-      "uuid": "11.1.1"
-    }
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/marcosmartinezaesa/rrhh.git"
-  }
-}
-</file>
-
 <file path="public/app.js">
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -197,11 +263,11 @@ async function refresh(){[people,campaigns]=await Promise.all([api('/candidates'
 async function boot(){me=await api('/me');await refresh();$('#identity').textContent=me.username;$('#login').hidden=true;$('#app').hidden=false;render();}
 function render(){document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));$('#breadcrumb').textContent={candidates:'Postulantes',campaigns:'Convocatorias',settings:'Configuración'}[view];({candidates:renderPeople,campaigns:renderCampaigns,settings:renderSettings}[view])();}
 function renderPeople(){const confirmed=campaigns.reduce((n,c)=>n+c.invitations.filter(i=>i.status==='Confirmó').length,0);$('#content').innerHTML=`<div class="heading"><div><h1>Encontrá tu próximo equipo.</h1><p>Todos los postulantes, un solo lugar para dar el siguiente paso.</p></div><div class="actions"><button id="import">↑ &nbsp; Importar Excel</button><button class="primary" id="new">+ &nbsp; Nuevo postulante</button></div></div><div class="stats">${[['Postulantes',people.length,'Fichas en tu base'],['Por revisar',people.filter(p=>p.status==='Pendiente').length,'Pendientes de evaluación'],['Preseleccionados',people.filter(p=>p.status==='Preseleccionado').length,'Revisados por el equipo'],['Confirmaciones',confirmed,'En todas las convocatorias']].map(([a,b,c])=>`<div class="stat"><small>${a}</small><strong>${b}</strong><span>${c}</span></div>`).join('')}</div><div class="panel"><div class="heading"><h2>Base de postulantes</h2><span class="muted">Selección con revisión humana</span></div><div class="filters"><input id="search" placeholder="Buscar nombre, teléfono o localidad" aria-label="Buscar postulantes"><select id="statusFilter" aria-label="Estado">${options(['Todos los estados','Pendiente','Revisado','Preseleccionado','Archivado'])}</select><select id="licenseFilter" aria-label="Licencia">${options(['Todas las licencias','B1','B2','C1','C2','C3','E1','Sin dato'])}</select><input id="radius" type="number" min="0" placeholder="Radio máximo (km)" aria-label="Radio máximo en kilómetros"></div><div class="toolbar"><span id="selectionCount" class="muted"></span><button id="addToCampaign">Agregar a convocatoria</button><button id="reload">↻ Actualizar</button></div><div class="table-wrap"><table><thead><tr><th></th><th>POSTULANTE</th><th>LOCALIDAD</th><th>LICENCIA</th><th>DISTANCIA</th><th>ESTADO</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div id="empty" class="empty" hidden></div></div><div class="notice">Ubicación de referencia: Juan Manuel de Rosas 21028, Virrey del Pino. Radio inicial sugerido: 15 km, pendiente de validar. Las distancias se cargan manualmente; si faltan, el postulante permanece visible para revisión.</div>`;bind('#new','click',()=>editPerson());bind('#import','click',importExcel);bind('#reload','click',async()=>{await refresh();render();});bind('#addToCampaign','click',addToCampaign);['#search','#statusFilter','#licenseFilter','#radius'].forEach(s=>bind(s,'input',drawRows));drawRows();}
-function drawRows(){const term=$('#search').value.toLowerCase();const status=$('#statusFilter').value;const license=$('#licenseFilter').value;const radius=$('#radius').value;const rows=people.filter(p=>[p.name,p.phone,p.locality].join(' ').toLowerCase().includes(term)&&(status==='Todos los estados'||p.status===status)&&(license==='Todas las licencias'||(license==='Sin dato'?!p.license:p.license.toUpperCase().split(/[\s,;/]+/).includes(license)))&&(!radius||p.distance==null||p.distance<=Number(radius)));$('#rows').innerHTML=rows.map(p=>`<tr><td><input type="checkbox" aria-label="Seleccionar ${esc(p.name)}" data-select="${p.id}" ${selected.has(p.id)?'checked':''}></td><td><div class="person"><span class="avatar">${esc(p.name.split(' ').map(s=>s[0]).slice(0,2).join('').toUpperCase())}</span><div>${esc(p.name)}<small>${esc(p.phone||'WhatsApp por confirmar')}</small></div></div></td><td>${esc(p.locality||'Por confirmar')}</td><td>${esc(p.license||'Sin dato')}</td><td>${p.distance==null?'Por confirmar':esc(p.distance)+' km'}</td><td><span class="badge ${p.status==='Preseleccionado'?'green':''}">${esc(p.status)}</span></td><td><button data-edit="${p.id}">Ver ficha ↗</button></td></tr>`).join('');$('#empty').hidden=!!rows.length;$('#empty').innerHTML=people.length?'<strong>No hay coincidencias</strong>Probá con otros filtros.':'<strong>Un nuevo equipo empieza con una ficha</strong>Cargá el primer postulante o importá un Excel para empezar.';document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>editPerson(Number(b.dataset.edit)).catch(e=>toast(e.message)));document.querySelectorAll('[data-select]').forEach(b=>b.onchange=()=>{const id=Number(b.dataset.select);b.checked?selected.add(id):selected.delete(id);selectionCount();});selectionCount();}
+function drawRows(){const term=$('#search').value.toLowerCase();const status=$('#statusFilter').value;const license=$('#licenseFilter').value;const radius=$('#radius').value;const rows=people.filter(p=>[p.name,p.phone,p.cvPhone,p.locality].join(' ').toLowerCase().includes(term)&&(status==='Todos los estados'||p.status===status)&&(license==='Todas las licencias'||(license==='Sin dato'?!p.license:p.license.toUpperCase().split(/[\s,;/]+/).includes(license)))&&(!radius||p.distance==null||p.distance<=Number(radius)));$('#rows').innerHTML=rows.map(p=>`<tr><td><input type="checkbox" aria-label="Seleccionar ${esc(p.name)}" data-select="${p.id}" ${selected.has(p.id)?'checked':''}></td><td><div class="person"><span class="avatar">${esc(p.name.split(' ').map(s=>s[0]).slice(0,2).join('').toUpperCase())}</span><div>${esc(p.name)}<small>${esc(p.phone||(p.cvPhone?'CV: '+p.cvPhone:'WhatsApp por confirmar'))}</small></div></div></td><td>${esc(p.locality||'Por confirmar')}</td><td>${esc(p.license||'Sin dato')}</td><td>${p.distance==null?'Por confirmar':esc(p.distance)+' km'}</td><td><span class="badge ${p.status==='Preseleccionado'?'green':''}">${esc(p.status)}</span></td><td><button data-edit="${p.id}">Ver ficha ↗</button></td></tr>`).join('');$('#empty').hidden=!!rows.length;$('#empty').innerHTML=people.length?'<strong>No hay coincidencias</strong>Probá con otros filtros.':'<strong>Un nuevo equipo empieza con una ficha</strong>Cargá el primer postulante o importá un Excel para empezar.';document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>editPerson(Number(b.dataset.edit)).catch(e=>toast(e.message)));document.querySelectorAll('[data-select]').forEach(b=>b.onchange=()=>{const id=Number(b.dataset.select);b.checked?selected.add(id):selected.delete(id);selectionCount();});selectionCount();}
 function selectionCount(){$('#selectionCount').textContent=`${selected.size} seleccionados`;} 
 async function editPerson(id){const p=id?await api('/candidates').then(rows=>rows.find(r=>r.id===id)):{};if(!p)throw Error('Ficha no encontrada');const input=(key,label,type='text')=>`<label>${label}<input name="${key}" type="${type}" ${key==='name'?'required':''} ${type==='number'?'min="0" step="0.1"':''} value="${esc(p[key])}"></label>`;modal(`${modalHead(id?'Ficha del postulante':'Nuevo postulante')}<form id="personForm"><div class="form-grid">${input('name','Nombre y apellido')}${input('phone','WhatsApp del chat')}${input('cvPhone','Teléfono indicado en el CV')}${input('locality','Localidad')}${input('address','Domicilio declarado')}${input('distance','Distancia verificada (km)','number')}${input('license','Licencia declarada (ej.: B1, C1)')}${input('licenseExpiry','Vencimiento de licencia','date')}<label>Mayoría de edad declarada<select name="adult">${options(['Por confirmar','Sí','No'],p.adult)}</select></label><label>Estado de revisión<select name="status">${options(['Pendiente','Revisado','Preseleccionado','Archivado'],p.status)}</select></label>${input('availability','Disponibilidad y traslado')}${input('source','Origen del dato')}<label class="wide">Experiencia<textarea name="experience">${esc(p.experience)}</textarea></label><label class="wide">Notas y evidencias<textarea name="notes">${esc(p.notes)}</textarea></label></div><div id="phoneWarning" class="notice" hidden>El WhatsApp del chat difiere del teléfono del CV. Verificá a quién corresponde antes de contactar.</div><div class="form-actions"><button class="primary">Guardar ficha</button></div></form>${id?'<hr><h3>Currículums y lectura</h3><p class="muted">PDF, JPG o PNG · máximo 15 MB. Los datos extraídos deben verificarse y copiarse a la ficha.</p><form id="uploadForm" class="toolbar"><input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required><button>Cargar y leer CV</button></form><div id="documents"></div>':'<p class="muted">Guardá la ficha para adjuntar el CV.</p>'}`);const warning=()=>{const f=$('#personForm');const a=f.elements.phone.value.replace(/\D/g,'');const b=f.elements.cvPhone.value.replace(/\D/g,'');$('#phoneWarning').hidden=!(a&&b&&a!==b);};bind('#personForm','input',warning);warning();bind('#personForm','submit',async e=>{e.preventDefault();const body={...Object.fromEntries(new FormData(e.target)),version:p.version};await api(id?'/candidates/'+id:'/candidates',{method:id?'PUT':'POST',body});$('#modal').close();await refresh();render();toast('Ficha guardada');});if(id){await documents(id);bind('#uploadForm','submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await api(`/candidates/${id}/documents`,{method:'POST',body:new FormData(e.target)});e.target.reset();await documents(id);toast('CV guardado. La lectura se procesa en el servidor.');}finally{b.disabled=false;}});}}
 async function documents(id){const docs=await api(`/candidates/${id}/documents`);$('#documents').innerHTML=docs.map(d=>`<details><summary>${esc(d.original)} · ${esc(d.status)}</summary><p><a href="/api/documents/${d.id}">Descargar original</a></p><pre>${esc(d.text||'Sin texto disponible todavía. Actualizá la lectura en unos instantes.')}</pre></details>`).join('')+'<button type="button" id="refreshDocs">Actualizar lectura</button>';bind('#refreshDocs','click',()=>documents(id));}
-function importExcel(){modal(`${modalHead('Importar postulantes desde Excel')}<p>Se lee la primera hoja, con encabezados en la fila 1. Revisá la vista previa antes de incorporar las fichas.</p><form id="excelForm" class="toolbar"><input type="file" name="file" accept=".xlsx" required><button class="primary">Leer archivo</button></form><div id="preview"></div>`);bind('#excelForm','submit',async e=>{e.preventDefault();const result=await api('/import/preview',{method:'POST',body:new FormData(e.target)});const good=result.rows.filter(r=>r.name);$('#preview').innerHTML=`<p>${esc(result.sheet)} · ${good.length} filas con nombre / ${result.rows.length} filas totales.</p><p class="muted">Columnas sin correspondencia: ${esc(result.headers.filter(h=>!h.field).map(h=>h.label).join(', ')||'Ninguna')}. Se omiten de esta importación.</p><div class="table-wrap"><table><thead><tr><th>Nombre</th><th>WhatsApp</th><th>Localidad</th><th>Licencia</th></tr></thead><tbody>${good.slice(0,100).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.phone)}</td><td>${esc(r.locality)}</td><td>${esc(r.license)}</td></tr>`).join('')}</tbody></table></div><p class="muted">Vista previa de hasta 100 filas. Duplicados exactos por nombre y teléfono se omiten. Las filas sin nombre no se importan.</p><button id="commitImport" class="primary" ${good.length?'':'disabled'}>Importar ${good.length} fichas</button>`;bind('#commitImport','click',async e=>{e.target.disabled=true;try{const r=await api('/import/commit',{method:'POST',body:{rows:good}});$('#modal').close();await refresh();render();toast(`${r.added} fichas importadas; ${r.skipped} duplicadas omitidas`);}finally{e.target.disabled=false;}});});}
+function importExcel(){modal(`${modalHead('Importar postulantes desde Excel')}<p>Se detecta la hoja EVALUACION o la primera hoja y sus encabezados. Los datos adicionales se conservan en notas. Revisá la vista previa antes de incorporar las fichas.</p><form id="excelForm" class="toolbar"><input type="file" name="file" accept=".xlsx" required><button class="primary">Leer archivo</button></form><div id="preview"></div>`);bind('#excelForm','submit',async e=>{e.preventDefault();const result=await api('/import/preview',{method:'POST',body:new FormData(e.target)});const good=result.rows.filter(r=>r.name);$('#preview').innerHTML=`<p>${esc(result.sheet)} · Encabezados en fila ${result.headerRow} · ${good.length} filas con nombre / ${result.rows.length} filas totales.</p><p class="muted">Columnas conservadas en notas: ${esc(result.headers.filter(h=>!h.field).map(h=>h.label).join(', ')||'Ninguna')}. Los resultados del Excel quedan como antecedentes; todas las fichas se importan pendientes de revisión.</p><div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Contacto</th><th>Localidad</th><th>Licencia</th></tr></thead><tbody>${good.slice(0,100).map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.phone||r.cvPhone)}</td><td>${esc(r.locality)}</td><td>${esc(r.license)}</td></tr>`).join('')}</tbody></table></div><p class="muted">Vista previa de hasta 100 filas. Duplicados exactos por nombre y ambos teléfonos se omiten. Las filas sin nombre no se importan.</p><button id="commitImport" class="primary" ${good.length?'':'disabled'}>Importar ${good.length} fichas</button>`;bind('#commitImport','click',async e=>{e.target.disabled=true;try{const r=await api('/import/commit',{method:'POST',body:{rows:good}});$('#modal').close();await refresh();render();toast(`${r.added} fichas importadas; ${r.skipped} duplicadas omitidas`);}finally{e.target.disabled=false;}});});}
 function renderCampaigns(){$('#content').innerHTML=`<div class="heading"><div><h1>Conversaciones que abren puertas.</h1><p>Organizá entrevistas y registrá cada respuesta.</p></div><button id="newCampaign" class="primary">+ Nueva convocatoria</button></div>${campaigns.length?campaigns.map(c=>`<div class="panel"><div class="campaign"><div><h2>${esc(c.title)}</h2><p>${esc(c.date)} · ${esc(c.time)} hs · Cupo: ${c.capacity}</p><button data-campaign="${c.id}">Ver convocatoria ↗</button></div><div><strong>${c.invitations.length} / ${c.capacity}</strong><small>seleccionados</small></div><div><strong>${c.invitations.filter(i=>i.status==='Confirmó').length}</strong><small>confirmados</small></div></div></div>`).join(''):'<div class="panel empty"><strong>Prepará tu primera convocatoria</strong>Definí fecha, hora y cupo; luego agregá personas desde Postulantes.</div>'}<div class="notice">Las invitaciones se preparan para copiar. El envío y la confirmación se registran manualmente en esta etapa.</div>`;bind('#newCampaign','click',newCampaign);document.querySelectorAll('[data-campaign]').forEach(b=>b.onclick=()=>campaignDetail(Number(b.dataset.campaign)));}
 function newCampaign(){modal(`${modalHead('Nueva convocatoria')}<form id="campaignForm"><div class="form-grid"><label class="wide">Título<input name="title" required placeholder="Entrevistas · Reparto y distribución"></label><label>Fecha<input name="date" type="date" required></label><label>Horario de inicio<input name="time" type="time" required></label><label>Cupo de postulantes<input name="capacity" type="number" min="1" max="1000" value="40" required></label></div><div class="form-actions"><button class="primary">Crear convocatoria</button></div></form>`);bind('#campaignForm','submit',async e=>{e.preventDefault();await api('/campaigns',{method:'POST',body:Object.fromEntries(new FormData(e.target))});$('#modal').close();await refresh();render();});}
 function addToCampaign(){if(!selected.size)return toast('Seleccioná al menos un postulante');if(!campaigns.length){view='campaigns';render();return newCampaign();}modal(`${modalHead('Agregar a una convocatoria')}<p>${selected.size} postulantes seleccionados, incluidos los que no se ven por los filtros.</p><form id="assignForm"><label>Convocatoria<select name="campaign">${campaigns.map(c=>`<option value="${c.id}">${esc(c.title)} · ${c.invitations.length}/${c.capacity}</option>`).join('')}</select></label><p class="muted">Agregar personas no envía mensajes.</p><button class="primary">Agregar selección</button></form>`);bind('#assignForm','submit',async e=>{e.preventDefault();await api(`/campaigns/${e.target.elements.campaign.value}/invitations`,{method:'POST',body:{ids:[...selected]}});selected.clear();$('#modal').close();await refresh();render();toast('Selección agregada a la convocatoria');});}
@@ -266,112 +332,6 @@ input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid v
 @media(max-width:1199px){aside{width:210px;padding:28px 16px}.brand img{height:57px}main{margin-left:210px}#content{padding:25px}.heading{align-items:flex-start;flex-direction:column}.stats{gap:10px}.stat{padding:18px}.stat small{font-size:10px}header{padding:15px 25px}.location{display:none}.filters{grid-template-columns:1fr 1fr}.panel>.heading{gap:8px}.actions{flex-wrap:wrap}#content>.heading{padding:26px}}
 @media(max-width:760px){aside{position:static;width:auto;padding:15px 18px;background:#ffffffeb}.brand{display:flex;align-items:center;gap:15px;padding:0}.brand img{width:105px;height:40px;margin:0}.brand span{display:block;margin:0;font-size:8px;letter-spacing:1.6px}.nav-title{display:none}.aside-bottom{display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px 0 0;font-size:10px}.aside-bottom p{margin:0}.aside-bottom button{margin-left:auto;padding:0;font-size:10px}nav{display:flex;margin-top:16px;gap:6px}nav button{font-size:11px;padding:10px;flex:1;text-align:center;border-radius:9px}main{margin:0}header{height:60px;padding:10px 18px;font-size:9px}.header-brand img{width:91px;height:36px}header b{font-size:10px}#content{padding:20px 14px}.stats{grid-template-columns:1fr 1fr}.stat{padding:18px}.stat strong{font-size:30px}.stat span{font-size:10px}#content>.heading{padding:24px 19px;gap:20px;border-radius:17px}h1{font-size:28px}.heading p{font-size:12px;line-height:1.7}.actions{width:100%;gap:8px}.actions button{flex:1;padding:11px 9px;font-size:11px}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.panel{padding:17px;border-radius:15px}.filters{gap:9px}.filters input,.filters select{padding:11px 9px;font-size:11px}.toolbar{flex-wrap:wrap;gap:8px}.toolbar button{padding:9px 10px;font-size:11px}.toolbar #selectionCount{width:100%;margin-bottom:4px}.campaign{flex-wrap:wrap}.campaign>div:first-child{width:100%}footer{padding:18px}footer span{display:none}dialog{padding:22px 18px;border-radius:17px}.notice{padding:13px 15px;font-size:11px}.login-card{padding:32px 27px 25px}.login-card h1{font-size:34px}.login-card .brand img{width:135px}.login-card .brand span{padding-left:15px}.login-partner span{font-size:10px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
-</file>
-
-<file path="README.md">
-# RRHH IVESS
-
-Aplicación web interna para centralizar postulantes y organizar entrevistas. Node.js 20, Express y SQLite; los navegadores comparten la base del servidor.
-
-## Iniciar en esta PC
-
-1. Ejecutar `iniciar.cmd` o `npm start` en `C:\RRHH`.
-2. Abrir http://localhost:3050 en el servidor.
-3. En la primera instalación, consultar `data\clave-inicial.txt` y crear el administrador desde la pantalla inicial. La clave se elimina al completar el alta. Contraseña mínima: 12 caracteres.
-4. Desde las otras PC, abrir `http://IP-DEL-SERVIDOR:3050`. El servidor escucha en todas sus interfaces. Configurar una reserva de IP en el router y permitir el puerto TCP 3050 solamente en la red interna si el firewall lo bloquea.
-
-No se abrieron puertos del firewall ni se configuró el router. Para redes no confiables, usar HTTPS mediante un proxy y `COOKIE_SECURE=1`.
-
-## Funciones implementadas
-
-- Administrador y operadores, contraseñas con scrypt, sesiones de 8 horas, límites de intentos y registro de acciones.
-- Fichas persistentes: WhatsApp del chat separado del teléfono del CV, localidad, domicilio, licencia, vencimiento, mayoría de edad declarada, distancia, traslado, experiencia y notas.
-- Control de modificaciones concurrentes: una ficha editada por otro usuario exige recargar antes de guardar.
-- Filtros por texto, estado, licencia declarada y distancia verificada manualmente. Sin distancia conocida, la ficha sigue visible. No hay ranking ni descarte automático por edad.
-- CV originales PDF/JPG/PNG hasta 15 MB. Extracción de texto PDF y OCR local de imágenes o PDF escaneados, máximo 20 páginas en OCR. Procesamiento OCR en serie. Texto disponible junto al original; completar los campos requiere revisión humana.
-- Excel XLSX: primera hoja, encabezados en fila 1, vista previa y confirmación de importación. Reconoce Nombre / Nombre y apellido / Postulante / Candidato, WhatsApp / Teléfono, Localidad, Domicilio / Dirección, Licencia / Registro, Experiencia, Observaciones. Hasta 2000 filas. Omite duplicados exactos de nombre y teléfono. Muestra columnas no reconocidas antes de importar; no adapta todavía el Excel original que no fue adjuntado.
-- Convocatorias con fecha, horario inicial y cupo; selección manual, textos de invitación editables para copiar y estados de confirmación/asistencia. No realiza envíos. Un único horario por convocatoria; usar convocatorias separadas para distintos turnos.
-- Copia de seguridad manual de SQLite y CV desde Configuración. Usuarios y contraseñas cifradas mediante hash quedan incluidos en la base. Guardar las copias en un destino protegido externo al servidor.
-
-## Dependencias e instalación en otra PC
-
-Ejecutar `npm ci`, instalar Python con `pip install pymupdf` y Tesseract OCR. `ocr.py` utiliza PyMuPDF y el ejecutable Tesseract. En esta PC están instalados y se descargó el modelo español en `data\tessdata\spa.traineddata` desde el repositorio oficial https://github.com/tesseract-ocr/tessdata_fast. Sin modelo español local, usa inglés como alternativa.
-
-Variables opcionales: `PORT` (3050), `HOST` (0.0.0.0), `DATA_DIR`, `PYTHON_BIN`, `TESSERACT_BIN`, `OCR_LANG`, `COOKIE_SECURE`. El certificado `data\windows-ca.pem` se generó a partir del almacén de confianza de Windows para instalar dependencias en este entorno; no contiene claves privadas.
-
-Pruebas: `npm test`. Los datos de prueba usan una carpeta temporal aislada y se eliminan al finalizar.
-
-## Datos y recuperación
-
-La base está en `data\rrhh.sqlite` y los adjuntos en `data\cv`. No borrar los archivos WAL mientras el servidor está activo. Para restaurar, detener el programa, guardar una copia del estado actual y reemplazar la base y `cv` con los de la misma copia de seguridad; retirar archivos WAL/SHM antiguos únicamente con el servidor detenido. Conservar el modelo OCR local. Reiniciar el servidor.
-
-El inicio automático y las copias programadas no están configurados. `iniciar.cmd` permite inicio manual; para operación continua puede registrarse en el Programador de tareas de Windows con el directorio de trabajo `C:\RRHH`.
-
-## Pendiente de los archivos de referencia
-
-Se recibió `transferencias-main.zip` y se revisó su conexión de WhatsApp: ver [notas de referencia](docs/transferencias-referencia.md). El ZIP original queda en `data/referencias`, excluido de GitHub y Repomix. Siguen pendientes `Evaluacion_CVs_2026-09-09.xlsx` e `INICIAR_RRHH_IVESS_CODEX.md`. No se importaron candidatos ficticios como datos reales.
-
-WhatsApp queda pendiente: QR, sesión independiente, importación de chats/adjuntos, conciliación del teléfono de origen y sincronización de respuestas. También quedan para ampliación la extracción estructurada avanzada de CV, geocodificación/distancias verificadas y turnos individuales. No reutilizar ni modificar sesiones de los otros proyectos.
-
-Documentación de dependencias: [ExcelJS](https://www.npmjs.com/package/exceljs), [better-sqlite3](https://www.npmjs.com/package/better-sqlite3), [pdf-parse](https://www.npmjs.com/package/pdf-parse).
-
-
-## GitHub y Repomix
-
-Repositorio: https://github.com/marcosmartinezaesa/rrhh
-
-Ejecutar `npm run repomix` para actualizar `repomix-output.xml`, el resumen del código para compartir contexto. Se versiona junto al proyecto; regenerarlo antes de subir cambios. `npm run repomix:stdout` permite obtenerlo por consola.
-
-La configuración mantiene la [revisión de seguridad de Repomix](https://repomix.com/guide/security) y excluye CV, datos, copias, sesiones, secretos y dependencias instaladas. Los logos binarios se conservan en GitHub; Repomix resume archivos de texto.
-
-Repomix está fijado en 1.14.1 (correcciones de seguridad). Declara Node.js 22 o superior; la generación local fue verificada también con Node 20.19.4, pero para usar la herramienta en otras PC corresponde Node 22+. El servidor actual sigue usando Node 20.
-</file>
-
-<file path="repomix.config.json">
-{
-  "$schema": "https://repomix.com/schemas/latest/schema.json",
-  "output": {
-    "filePath": "repomix-output.xml",
-    "style": "xml",
-    "fileSummary": true,
-    "directoryStructure": true,
-    "removeComments": false
-  },
-  "include": [
-    "server.js",
-    "ocr.py",
-    "iniciar.cmd",
-    "public/**",
-    "scripts/**",
-    "test/**",
-    "README.md",
-    "package.json",
-    "repomix.config.json",
-    ".gitignore",
-    ".repomixignore",
-    "docs/**"
-  ],
-  "ignore": {
-    "useGitignore": true,
-    "useDefaultPatterns": true,
-    "customPatterns": [
-      "data/**",
-      "backups/**",
-      "node_modules/**",
-      ".git/**",
-      ".env*",
-      "*.sqlite*",
-      "*.db",
-      "*.pem",
-      "*.key",
-      "repomix-output.*",
-      "package-lock.json"
-    ]
-  },
-  "security": {
-    "enableSecurityCheck": true
-  }
-}
 </file>
 
 <file path="scripts/browser-check.js">
@@ -441,9 +401,9 @@ app.post('/api/candidates/:id/documents',upload.single('file'),wrap(async(req,re
 let ocrQueue=Promise.resolve();
 async function processDocument(id,target,ext){let text='';if(ext==='.pdf'){try{text=(await pdf(fs.readFileSync(target))).text;}catch{}}if(text.trim().length<40){const localSpanish=fs.existsSync(path.join(root,'tessdata','spa.traineddata'));const job=()=>run(process.env.PYTHON_BIN||'python',[path.join(__dirname,'ocr.py'),target,process.env.TESSERACT_BIN||'C:\\Program Files\\Tesseract-OCR\\tesseract.exe',process.env.OCR_LANG||(localSpanish?'spa':'eng')],{timeout:180000,maxBuffer:4*1024*1024,windowsHide:true,env:{...process.env,...(localSpanish&&!process.env.OCR_LANG?{TESSDATA_PREFIX:path.join(root,'tessdata')}:{})}}).then(r=>r.stdout);const result=ocrQueue.then(job);ocrQueue=result.catch(()=>{});text=await result;}db.prepare('UPDATE documents SET text=?,status=? WHERE id=?').run(text.slice(0,200000),text.trim()?'Lectura lista · revisar datos':'Sin texto legible · revisar original',id);}
 db.prepare("UPDATE documents SET status='Lectura interrumpida · volver a cargar' WHERE status='Procesando'").run();
-const normalize=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');
-app.post('/api/import/preview',upload.single('file'),wrap(async(req,res)=>{if(!req.file||path.extname(req.file.originalname).toLowerCase()!=='.xlsx')fail('Seleccioná un archivo XLSX');const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(req.file.buffer);const sheet=workbook.worksheets[0];if(!sheet)fail('El Excel no contiene hojas');if(sheet.rowCount>2000)fail('Máximo 2000 filas por importación');const aliases={nombre:'name',nombreyapellido:'name',postulante:'name',candidato:'name',whatsapp:'phone',telefono:'phone',localidad:'locality',domicilio:'address',direccion:'address',licencia:'license',registro:'license',experiencia:'experience',observaciones:'notes'};const headers=[];sheet.getRow(1).eachCell((cell,col)=>headers.push({col,label:cell.text,field:aliases[normalize(cell.text)]||''}));const rows=[];sheet.eachRow((row,index)=>{if(index===1)return;const result={};for(const h of headers)if(h.field)result[h.field]=row.getCell(h.col).text;rows.push({row:index,...result});});res.json({sheet:sheet.name,headers,rows});}));
-app.post('/api/import/commit',wrap((req,res)=>{if(!Array.isArray(req.body.rows)||req.body.rows.length>2000)fail('Importación inválida');let added=0,skipped=0;db.transaction(()=>{for(const raw of req.body.rows){const row=candidate({...raw,source:'Excel · revisión pendiente'});if(db.prepare('SELECT id FROM candidates WHERE name=? AND phone=?').get(row.name,row.phone)){skipped++;continue;}insert.run(row);added++;}})();audit(req,`Excel: ${added} fichas importadas`);res.json({added,skipped});}));
+const {previewWorkbook}=require('./scripts/excel-import');
+app.post('/api/import/preview',upload.single('file'),wrap(async(req,res)=>{if(!req.file||path.extname(req.file.originalname).toLowerCase()!=='.xlsx')fail('Seleccioná un archivo XLSX');try{res.json(await previewWorkbook(req.file.buffer,path.basename(req.file.originalname)));}catch(error){fail(error.message);}}));
+app.post('/api/import/commit',wrap((req,res)=>{if(!Array.isArray(req.body.rows)||req.body.rows.length>2000)fail('Importación inválida');let added=0,skipped=0;db.transaction(()=>{for(const raw of req.body.rows){const row=candidate({...raw,status:'Pendiente',source:raw.source||'Excel · revisión pendiente'});if(db.prepare('SELECT id FROM candidates WHERE name=? AND phone=? AND cvPhone=?').get(row.name,row.phone,row.cvPhone)){skipped++;continue;}insert.run(row);added++;}})();audit(req,`Excel: ${added} fichas importadas`);res.json({added,skipped});}));
 app.get('/api/campaigns',(req,res)=>res.json(db.prepare('SELECT * FROM campaigns ORDER BY date DESC').all().map(c=>({...c,invitations:db.prepare('SELECT i.*,c.name,c.phone FROM invitations i JOIN candidates c ON c.id=i.candidate_id WHERE campaign_id=?').all(c.id)}))));
 app.post('/api/campaigns',wrap((req,res)=>{const {title,date,time,capacity}=req.body;if(!title||String(title).length>200||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^\d{2}:\d{2}$/.test(time)||!Number.isInteger(Number(capacity))||capacity<1||capacity>1000)fail('Completá título, fecha, hora y cupo válido');const info=db.prepare('INSERT INTO campaigns(title,date,time,capacity) VALUES (?,?,?,?)').run(title,date,time,capacity);audit(req,'Convocatoria creada');res.json({id:info.lastInsertRowid});}));
 const invitationStatuses=['Seleccionado','Invitado','Confirmó','No puede asistir','Sin respuesta','Asistió','No asistió'];
@@ -497,6 +457,169 @@ test('Acceso, fichas concurrentes, importación, convocatorias y permisos',async
  await request('/logout','POST');assert.equal((await request('/candidates')).status,401);
 });
 after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(dir,{recursive:true,force:true});});
+</file>
+
+<file path=".gitignore">
+node_modules/
+data/
+backups/
+*.log
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.db
+*.pem
+*.key
+__pycache__/
+</file>
+
+<file path="package.json">
+{
+  "name": "rrhh-ivess",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node server.js",
+    "repomix": "repomix",
+    "repomix:stdout": "repomix --stdout"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
+    "multer": "^2.3.0",
+    "pdf-parse": "^1.1.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "repomix": "1.14.1"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marcosmartinezaesa/rrhh.git"
+  }
+}
+</file>
+
+<file path="README.md">
+# RRHH IVESS
+
+Aplicación web interna para centralizar postulantes y organizar entrevistas. Node.js 20, Express y SQLite; los navegadores comparten la base del servidor.
+
+## Iniciar en esta PC
+
+1. Ejecutar `iniciar.cmd` o `npm start` en `C:\RRHH`.
+2. Abrir http://localhost:3050 en el servidor.
+3. En la primera instalación, consultar `data\clave-inicial.txt` y crear el administrador desde la pantalla inicial. La clave se elimina al completar el alta. Contraseña mínima: 12 caracteres.
+4. Desde las otras PC, abrir `http://IP-DEL-SERVIDOR:3050`. El servidor escucha en todas sus interfaces. Configurar una reserva de IP en el router y permitir el puerto TCP 3050 solamente en la red interna si el firewall lo bloquea.
+
+No se abrieron puertos del firewall ni se configuró el router. Para redes no confiables, usar HTTPS mediante un proxy y `COOKIE_SECURE=1`.
+
+## Funciones implementadas
+
+- Administrador y operadores, contraseñas con scrypt, sesiones de 8 horas, límites de intentos y registro de acciones.
+- Fichas persistentes: WhatsApp del chat separado del teléfono del CV, localidad, domicilio, licencia, vencimiento, mayoría de edad declarada, distancia, traslado, experiencia y notas.
+- Control de modificaciones concurrentes: una ficha editada por otro usuario exige recargar antes de guardar.
+- Filtros por texto, estado, licencia declarada y distancia verificada manualmente. Sin distancia conocida, la ficha sigue visible. No hay ranking ni descarte automático por edad.
+- CV originales PDF/JPG/PNG hasta 15 MB. Extracción de texto PDF y OCR local de imágenes o PDF escaneados, máximo 20 páginas en OCR. Procesamiento OCR en serie. Texto disponible junto al original; completar los campos requiere revisión humana.
+- Excel XLSX: detecta la hoja EVALUACION y encabezados en las primeras 30 filas; reconoce la planilla de referencia con encabezados en fila 8. Conserva observaciones y columnas adicionales en notas. Puntajes y resultados previos quedan como antecedentes, sin aplicar descartes. En la planilla de CV, los contactos se guardan como teléfono del CV y las licencias agrupadas quedan por confirmar. Vista previa y detección de duplicados por nombre y ambos teléfonos.
+- Convocatorias con fecha, horario inicial y cupo; selección manual, textos de invitación editables para copiar y estados de confirmación/asistencia. No realiza envíos. Un único horario por convocatoria; usar convocatorias separadas para distintos turnos.
+- Copia de seguridad manual de SQLite y CV desde Configuración. Usuarios y contraseñas cifradas mediante hash quedan incluidos en la base. Guardar las copias en un destino protegido externo al servidor.
+
+## Dependencias e instalación en otra PC
+
+Ejecutar `npm ci`, instalar Python con `pip install pymupdf` y Tesseract OCR. `ocr.py` utiliza PyMuPDF y el ejecutable Tesseract. En esta PC están instalados y se descargó el modelo español en `data\tessdata\spa.traineddata` desde el repositorio oficial https://github.com/tesseract-ocr/tessdata_fast. Sin modelo español local, usa inglés como alternativa.
+
+Variables opcionales: `PORT` (3050), `HOST` (0.0.0.0), `DATA_DIR`, `PYTHON_BIN`, `TESSERACT_BIN`, `OCR_LANG`, `COOKIE_SECURE`. El certificado `data\windows-ca.pem` se generó a partir del almacén de confianza de Windows para instalar dependencias en este entorno; no contiene claves privadas.
+
+Pruebas: `npm test`. Los datos de prueba usan una carpeta temporal aislada y se eliminan al finalizar.
+
+## Datos y recuperación
+
+La base está en `data\rrhh.sqlite` y los adjuntos en `data\cv`. No borrar los archivos WAL mientras el servidor está activo. Para restaurar, detener el programa, guardar una copia del estado actual y reemplazar la base y `cv` con los de la misma copia de seguridad; retirar archivos WAL/SHM antiguos únicamente con el servidor detenido. Conservar el modelo OCR local. Reiniciar el servidor.
+
+El inicio automático y las copias programadas no están configurados. `iniciar.cmd` permite inicio manual; para operación continua puede registrarse en el Programador de tareas de Windows con el directorio de trabajo `C:\RRHH`.
+
+## Pendiente de los archivos de referencia
+
+Se recibió `transferencias-main.zip` y se revisó su conexión de WhatsApp: ver [notas de referencia](docs/transferencias-referencia.md). El ZIP original queda en `data/referencias`, excluido de GitHub y Repomix. También se recibió `Evaluacion_CVs_2026-09-09.xlsx`; su original y los datos importados se conservan solo en el servidor. Sigue pendiente `INICIAR_RRHH_IVESS_CODEX.md`. No se importaron candidatos ficticios como datos reales.
+
+WhatsApp queda pendiente: QR, sesión independiente, importación de chats/adjuntos, conciliación del teléfono de origen y sincronización de respuestas. También quedan para ampliación la extracción estructurada avanzada de CV, geocodificación/distancias verificadas y turnos individuales. No reutilizar ni modificar sesiones de los otros proyectos.
+
+Documentación de dependencias: [ExcelJS](https://www.npmjs.com/package/exceljs), [better-sqlite3](https://www.npmjs.com/package/better-sqlite3), [pdf-parse](https://www.npmjs.com/package/pdf-parse).
+
+
+## GitHub y Repomix
+
+Repositorio: https://github.com/marcosmartinezaesa/rrhh
+
+Ejecutar `npm run repomix` para actualizar `repomix-output.xml`, el resumen del código para compartir contexto. Se versiona junto al proyecto; regenerarlo antes de subir cambios. `npm run repomix:stdout` permite obtenerlo por consola.
+
+La configuración mantiene la [revisión de seguridad de Repomix](https://repomix.com/guide/security) y excluye CV, datos, copias, sesiones, secretos y dependencias instaladas. Los logos binarios se conservan en GitHub; Repomix resume archivos de texto.
+
+Repomix está fijado en 1.14.1 (correcciones de seguridad). Declara Node.js 22 o superior; la generación local fue verificada también con Node 20.19.4, pero para usar la herramienta en otras PC corresponde Node 22+. El servidor actual sigue usando Node 20.
+
+Importación local de administración: `node scripts/import-excel.js RUTA.xlsx` muestra el conteo. Agregar `--apply` carga las fichas en una transacción y crea previamente una copia de la base en `data/import-backups`. No adjunta los CV mencionados en el Excel: esos archivos deben cargarse por separado.
+</file>
+
+<file path="repomix.config.json">
+{
+  "$schema": "https://repomix.com/schemas/latest/schema.json",
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "fileSummary": true,
+    "directoryStructure": true,
+    "removeComments": false
+  },
+  "include": [
+    "server.js",
+    "ocr.py",
+    "iniciar.cmd",
+    "public/**",
+    "scripts/**",
+    "test/**",
+    "README.md",
+    "package.json",
+    "repomix.config.json",
+    ".gitignore",
+    ".repomixignore",
+    "docs/**"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "data/**",
+      "backups/**",
+      "node_modules/**",
+      ".git/**",
+      ".env*",
+      "*.sqlite*",
+      "*.db",
+      "*.pem",
+      "*.key",
+      "repomix-output.*",
+      "package-lock.json"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}
 </file>
 
 </files>
